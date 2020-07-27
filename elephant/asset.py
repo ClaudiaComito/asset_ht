@@ -113,6 +113,11 @@ from tqdm import trange, tqdm
 import elephant.conversion as conv
 from elephant import spike_train_surrogates
 
+import sys
+sys.path.append("heat/")
+import heat as ht
+
+
 try:
     from mpi4py import MPI
 
@@ -124,7 +129,6 @@ except ImportError:
     mpi_accelerated = False
     size = 1
     rank = 0
-
 
 # =============================================================================
 # Some Utility Functions to be dealt with in some way or another
@@ -408,22 +412,17 @@ def _wrong_order(a):
             return True
     return False
 
-
 def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     r"""
     Considered n independent random variables X1, X2, ..., Xn all having
     uniform distribution in the interval (0, 1):
-
     .. centered::  Xi ~ Uniform(0, 1),
-
     given a 2D matrix U = (u_ij) where each U_i is an array of length d:
     U_i = [u0, u1, ..., u_{d-1}] of quantiles, with u1 <= u2 <= ... <= un,
     computes the joint survival function (jsf) of the d highest order
     statistics (U_{n-d+1}, U_{n-d+2}, ..., U_n),
     where U_k := "k-th highest X's" at each u_i, i.e.:
-
     .. centered::  jsf(u_i) = Prob(U_{n-k} >= u_ijk, k=0,1,..., d-1).
-
     Parameters
     ----------
     u : (A,d) np.ndarray
@@ -439,7 +438,6 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     verbose : bool
         If True, print messages during the computation.
         Default: False.
-
     Returns
     -------
     P_total : (A,) np.ndarray
@@ -543,6 +541,117 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     return P_total
 
 
+def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
+    r"""
+    Considered n independent random variables X1, X2, ..., Xn all having
+    uniform distribution in the interval (0, 1):
+
+    .. centered::  Xi ~ Uniform(0, 1),
+
+    given a 2D matrix U = (u_ij) where each U_i is an array of length d:
+    U_i = [u0, u1, ..., u_{d-1}] of quantiles, with u1 <= u2 <= ... <= un,
+    computes the joint survival function (jsf) of the d highest order
+    statistics (U_{n-d+1}, U_{n-d+2}, ..., U_n),
+    where U_k := "k-th highest X's" at each u_i, i.e.:
+
+    .. centered::  jsf(u_i) = Prob(U_{n-k} >= u_ijk, k=0,1,..., d-1).
+
+    Parameters
+    ----------
+    u : (A,d) np.ndarray
+        2D matrix of floats between 0 and 1.
+        Each row `u_i` is an array of length `d`, considered a set of
+        `d` largest order statistics extracted from a sample of `n` random
+        variables whose cdf is `F(x) = x` for each `x`.
+        The routine computes the joint cumulative probability of the `d`
+        values in `u_ij`, for each `i` and `j`.
+    n : int
+        Size of the sample where the `d` largest order statistics `u_ij` are
+        assumed to have been sampled from.
+    verbose : bool
+        If True, print messages during the computation.
+        Default: False.
+
+    Returns
+    -------
+    P_total : (A,) np.ndarray
+        Matrix of joint survival probabilities. `s_ij` is the joint survival
+        probability of the values `{u_ijk, k=0, ..., d-1}`.
+        Note: the joint probability matrix computed for the ASSET analysis
+        is `1 - S`.
+    """
+    num_p_vals, d = u.shape
+
+    # Define ranges [1,...,n], [2,...,n], ..., [d,...,n] for the mute variables
+    # used to compute the integral as a sum over all possibilities
+    lists = [range(j, n + 1) for j in range(d, 0, -1)]
+    it_todo = np.prod([n + 1 - j for j in range(d, 0, -1)])
+
+    log_1 = ht.log(ht.array(1.))
+    # Compute the log of the integral's coefficient
+    logK = ht.sum(ht.log(ht.arange(1, n + 1)))
+    # Add to the 3D matrix u a bottom layer equal to 0 and a
+    # top layer equal to 1. Then compute the difference du along
+    # the first dimension.
+    du = ht.diff(u, prepend=0, append=1, axis=1)
+
+    # precompute logarithms
+    # ignore warnings about infinities, see inside the loop:
+    # we replace 0 * ln(0) by 1 to get exp(0 * ln(0)) = 0 ** 0 = 1
+    # the remaining infinities correctly evaluate to
+    # exp(ln(0)) = exp(-inf) = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        log_du = ht.log(du)
+
+    # prepare arrays for usage inside the loop
+    di_scratch = ht.empty_like(du, dtype=ht.int32)
+    log_du_scratch = ht.empty_like(log_du)
+
+    # precompute log(factorial)s
+    # pad with a zero to get 0! = 1
+    log_factorial = ht.hstack((ht.array([0]), ht.cumsum(ht.log(ht.arange(1, n + 1))))) 
+
+    ## TODO: rewrite comments for heat implementation
+    # compute the probabilities for each unique row of du
+    # only loop over the indices and do all du entries at once
+    # using matrix algebra
+    # initialise probabilities to 0
+    matrix_entries = np.array(list(itertools.product(*lists)))
+    # differences
+    di = -np.diff(matrix_entries, prepend=n, append=0)
+    # discard "wrong order" entries 
+    di = di[di.min(axis=1) >= 0,:]
+    # distribute across ranks
+    di = ht.array(di, split=0)
+    # use precomputed factorials
+    vect_log_factorial = ht.empty(di.gshape[0], dtype=ht.float32, split=0)
+    vect_log_factorial = log_factorial[di]
+    vect_sum_log_di_factorial = vect_log_factorial.sum(axis=1)
+    # Use precomputed log
+    # Stack log_du  di.shape[0] times along axis 0
+    print("Copying log_du to local logs...")
+    log_du_local = [log_du for _ in trange(di.lshape[0])]
+    print("Stacking local logs...")
+    log_du_stacked = ht.stack(log_du_local, axis=0)
+    # vectorized log_du_scratch
+    vect_log_du_scratch = ht.array(log_du_stacked, is_split=0)
+    # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du with 1
+    # whenever di_scratch = 0, so that du ** di_scratch = 1 (this avoids
+    # nans when both du and di_scratch are 0, and is mathematically
+    # correct)
+    di_zero = ht.where(di == 0)._DNDarray__array  #TODO: get heat slicing to work with DNDarrays
+    #
+    vect_log_du_scratch[di_zero[:, 0],:, di_zero[:, 1]] = log_1
+    print("Multiplying each `di` entry by its `log_du`")
+    vect_di_log_du = ht.expand_dims(di, axis=1) * vect_log_du_scratch
+    print("Done di_log_du")
+    vect_sum_di_log_du = vect_di_log_du.sum(axis=2)
+    vect_logP = vect_sum_di_log_du - vect_sum_log_di_factorial.expand_dims(axis=1)
+    totals = ht.exp(vect_logP + logK).sum(axis=0)
+    print("ASSET: DONE TOTALS: shape, split", totals.shape, totals.split) 
+    return totals
+
 def _pmat_neighbors(mat, filter_shape, n_largest, verbose):
     """
     Build the 3D matrix `L` of largest neighbors of elements in a 2D matrix
@@ -588,9 +697,11 @@ def _pmat_neighbors(mat, filter_shape, n_largest, verbose):
     """
     l, w = filter_shape
 
+    # TODO check that mat is a DNDarray
+
     # if the matrix is symmetric the diagonal was set to 0.5
     # when computing the probability matrix
-    symmetric = np.all(np.diagonal(mat) == 0.5)
+    symmetric = ht.all(ht.diagonal(mat) == 0.5)
 
     # Check consistent arguments
     if w >= l:
@@ -601,38 +712,47 @@ def _pmat_neighbors(mat, filter_shape, n_largest, verbose):
                       'for both entries of filter_shape.')
 
     # Construct the kernel
-    filt = np.ones((l, l), dtype=np.float32)
-    filt = np.triu(filt, -w)
-    filt = np.tril(filt, w)
+    filt = ht.ones((l, l), dtype=ht.float32) #process-local, split=None
+    filt = ht.triu(filt, -w)
+    filt = ht.tril(filt, w)
 
     # Convert mat values to floats, and replaces np.infs with specified input
     # values
-    mat = np.array(mat, dtype=np.float32)
+    mat = ht.array(mat, dtype=ht.float32)
 
     # Initialize the matrix of d-largest values as a matrix of zeroes
-    lmat = np.zeros((n_largest, mat.shape[0], mat.shape[1]), dtype=np.float32)
+    lmat = ht.zeros((n_largest, mat.shape[0], mat.shape[1]), dtype=ht.float32)
 
     N_bin_y = mat.shape[0]
     N_bin_x = mat.shape[1]
     # if the matrix is symmetric do not use kernel positions intersected
     # by the diagonal
     if symmetric:
-        bin_range_y = trange(l, N_bin_y - l + 1, disable=not verbose)
+        bin_range_y = trange(l, N_bin_y - l + 1, disable=not verbose) #trange(...) = tqdm(range(...))
     else:
         bin_range_y = trange(N_bin_y - l + 1, disable=not verbose)
         bin_range_x = trange(N_bin_x - l + 1, disable=not verbose)
 
     # compute matrix of largest values
+    # TODO: heat version, is this really necessary? USE TOPK!!
     for y in bin_range_y:
         if symmetric:
             # x range depends on y position
             bin_range_x = trange(y - l + 1, disable=not verbose)
         for x in bin_range_x:
-            patch = mat[y: y + l, x: x + l]
-            mskd = np.multiply(filt, patch)
-            largest_vals = np.sort(mskd, axis=None)[-n_largest:]
+            patch = mat[y:y + l, x:x + l]  # TODO is mat distributed?
+            #print("patch = ", patch, patch.shape)
+            #print("filt = ", filt, filt.shape)
+            #print("bin_range_y = ", l, N_bin_y - l + 1, ", bin_range_x = ", y - l + 1)
+            mskd = ht.multiply(filt, patch)
+            #print("mskd = ", mskd, mskd.shape)
+            #heat workaround until sort() is fixed
+            largest_vals = ht.sort(mskd.flatten(), axis=None)[0][-n_largest:]
+            #print("largest_vals = ", largest_vals, len(largest_vals))
+            #print("slice = ", y + (l // 2), x + (l // 2))
+            #print("lmat.shape = ", lmat.shape)
             lmat[:, y + (l // 2), x + (l // 2)] = largest_vals
-
+            
     return lmat
 
 
@@ -1481,13 +1601,14 @@ class ASSET(object):
             print('compute the prob. that each neuron fires in each pair of '
                   'bins...')
 
-        spike_probs_x = [1. - np.exp(-(rate * self.bin_size).rescale(
-            pq.dimensionless).magnitude) for rate in fir_rate_x]
+        # use heat here:
+        spike_probs_x = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
+            pq.dimensionless).magnitude)) for rate in fir_rate_x]
         if symmetric:
             spike_probs_y = spike_probs_x
         else:
-            spike_probs_y = [1. - np.exp(-(rate * self.bin_size).rescale(
-                pq.dimensionless).magnitude) for rate in fir_rate_y]
+            spike_probs_y = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
+                pq.dimensionless).magnitude)) for rate in fir_rate_y]
 
         # For each neuron k compute the matrix of probabilities p_ijk that
         # neuron k spikes in both bins i and j. (For i = j it's just spike
@@ -1510,6 +1631,7 @@ class ASSET(object):
         # pdfs
         pmat = np.zeros(imat.shape, dtype=np.float32)
 
+        ###### TODO: heat implementation
         for i in range(imat.shape[0]):
             if mpi_accelerated and i % size != rank:
                 continue
@@ -1519,6 +1641,7 @@ class ASSET(object):
         if mpi_accelerated:
             for i in range(imat.shape[0]):
                 pmat[i] = comm.bcast(pmat[i], root=i % size)
+        ######
 
         if symmetric:
             # Substitute 0.5 to the elements along the main diagonal
@@ -1534,6 +1657,72 @@ class ASSET(object):
         Map a probability matrix `pmat` to a joint probability matrix `jmat`,
         where `jmat[i, j]` is the joint p-value of the largest neighbors of
         `pmat[i, j]`.
+        The values of `pmat` are assumed to be uniformly distributed in the
+        range [0, 1]. Centered a rectangular kernel of shape
+        `filter_shape=(l, w)` around each entry `pmat[i, j]`,
+        aligned along the diagonal where `pmat[i, j]` lies into, extracts the
+        `n_largest` values falling within the kernel and computes their joint
+        p-value `jmat[i, j]`.
+        Parameters
+        ----------
+        pmat : np.ndarray
+            A square matrix, the output of
+            :func:`ASSET.probability_matrix_montecarlo` or
+            :func:`ASSET.probability_matrix_analytical`, of cumulative
+            probability values between 0 and 1. The values are assumed
+            to be uniformly distributed in the said range.
+        filter_shape : tuple of int
+            A pair of integers representing the kernel shape `(l, w)`.
+        n_largest : int
+            The number of the largest neighbors to collect for each entry in
+            `jmat`.
+        min_p_value : float, optional
+            The minimum p-value in range `[0, 1)` for individual entries in
+            `pmat`. Each `pmat[i, j]` is set to
+            `min(pmat[i, j], 1-p_value_min)` to avoid that a single highly
+            significant value in `pmat` (extreme case: `pmat[i, j] = 1`) yields
+            joint significance of itself and its neighbors.
+            Default: 1e-5.
+        Returns
+        -------
+        jmat : np.ndarray
+            The joint probability matrix associated to `pmat`.
+        """
+        l, w = filter_shape
+
+        # Find for each P_ij in the probability matrix its neighbors and
+        # maximize them by the maximum value 1-p_value_min
+        pmat_neighb = _pmat_neighbors(
+            pmat, filter_shape=filter_shape, n_largest=n_largest,
+            verbose=self.verbose)
+
+        pmat_neighb = np.minimum(pmat_neighb, 1. - min_p_value)
+
+        # in order to avoid doing the same calculation multiple times:
+        # find all unique sets of values in pmat_neighb
+        # and store the corresponding indices
+        # flatten the second and third dimension in order to use np.unique
+        pmat_neighb = pmat_neighb.reshape(n_largest, pmat.size).T
+        pmat_neighb, pmat_neighb_indices = np.unique(pmat_neighb, axis=0,
+                                                     return_inverse=True)
+
+        # Compute the joint p-value matrix jpvmat
+        n = l * (1 + 2 * w) - w * (
+                w + 1)  # number of entries covered by kernel
+        jpvmat = _jsf_uniform_orderstat_3d(pmat_neighb, n,
+                                           verbose=self.verbose)
+
+        # restore the original shape using the stored indices
+        jpvmat = jpvmat[pmat_neighb_indices].reshape(pmat.shape)
+
+        return 1. - jpvmat
+
+    def joint_probability_matrix_ht(self, pmat, filter_shape, n_largest,
+                                 min_p_value=1e-5):
+        """
+        Map a probability matrix `pmat` to a joint probability matrix `jmat`,
+        where `jmat[i, j]` is the joint p-value of the largest neighbors of
+        `pmat[i, j]`.
 
         The values of `pmat` are assumed to be uniformly distributed in the
         range [0, 1]. Centered a rectangular kernel of shape
@@ -1541,6 +1730,7 @@ class ASSET(object):
         aligned along the diagonal where `pmat[i, j]` lies into, extracts the
         `n_largest` values falling within the kernel and computes their joint
         p-value `jmat[i, j]`.
+        # TODO heat version: map filter_shape across processes, run in parallel, halo?
 
         Parameters
         ----------
@@ -1577,26 +1767,28 @@ class ASSET(object):
             pmat, filter_shape=filter_shape, n_largest=n_largest,
             verbose=self.verbose)
 
-        pmat_neighb = np.minimum(pmat_neighb, 1. - min_p_value)
-
+        pmat_neighb = ht.minimum(ht.array(pmat_neighb), 1. - ht.array(min_p_value))
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
         # and store the corresponding indices
         # flatten the second and third dimension in order to use np.unique
-        pmat_neighb = pmat_neighb.reshape(n_largest, pmat.size).T
-        pmat_neighb, pmat_neighb_indices = np.unique(pmat_neighb, axis=0,
+        pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size)).T
+        print("pmat_neighb BEFORE UNIQUE= ", pmat_neighb, pmat_neighb.shape)
+        # TODO: fix ht.unique
+        pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, sorted=True,
                                                      return_inverse=True)
-
+        print("pmat_neighb AFTER UNIQUE= ", pmat_neighb, pmat_neighb.shape)
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
-        jpvmat = _jsf_uniform_orderstat_3d(pmat_neighb, n,
+        jpvmat = _jsf_uniform_orderstat_3d_ht(pmat_neighb, n,
                                            verbose=self.verbose)
-
+        
+        print("ASSET: jpvmat == jpvmat_ht: ", jpvmat == jpvmat_ht)
         # restore the original shape using the stored indices
         jpvmat = jpvmat[pmat_neighb_indices].reshape(pmat.shape)
 
-        return 1. - jpvmat
+        return 1. - jpvmat # this should be a DNDarray
 
     @staticmethod
     def mask_matrices(matrices, thresholds):
