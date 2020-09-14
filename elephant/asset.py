@@ -116,6 +116,8 @@ from elephant import spike_train_surrogates
 import sys
 sys.path.append("heat/")
 import heat as ht
+import torch
+import time
 
 
 try:
@@ -381,6 +383,78 @@ def _stretched_metric_2d(x, y, stretch, ref_angle):
     # Return the stretched distance matrix
     return D * stretch_mat
 
+def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
+    r"""
+    Given a list of points on the real plane, identified by their abscissa `x`
+    and ordinate `y`, compute a stretched transformation of the Euclidean
+    distance among each of them.
+
+    The classical euclidean distance `d` between points `(x1, y1)` and
+    `(x2, y2)`, i.e., :math:`\sqrt((x1-x2)^2 + (y1-y2)^2)`, is multiplied by a
+    factor
+
+    .. math::
+
+            1 + (stretch - 1.) * \abs(\sin(ref_angle - \theta)),
+
+    where :math:`\theta` is the angle between the points and the 45 degree
+    direction (i.e., the line `y = x`).
+
+    The stretching factor thus steadily varies between 1 (if the line
+    connecting `(x1, y1)` and `(x2, y2)` has inclination `ref_angle`) and
+    `stretch` (if that line has inclination `90 + ref_angle`).
+
+    Parameters
+    ----------
+    x : (n,) np.ndarray
+        Array of abscissas of all points among which to compute the distance.
+    y : (n,) np.ndarray
+        Array of ordinates of all points among which to compute the distance
+        (same shape as `x`).
+    stretch : float
+        Maximum stretching factor, applied if the line connecting the points
+        has inclination `90 + ref_angle`.
+    ref_angle : float
+        Reference angle in degrees (i.e., the inclination along which the
+        stretching factor is 1).
+
+    Returns
+    -------
+    D : (n,n) np.ndarray
+        Square matrix of distances between all pairs of points.
+
+    """
+    alpha = ht.deg2rad(ht.array(ref_angle))  # reference angle in radians
+
+    # Create the array of points (one per row) for which to compute the
+    # stretched distance
+    # NB: not needed in heat, input is the matrix already 
+    #points = ht.vstack([x, y]).T
+
+    # Compute the matrix D[i, j] of euclidean distances among points i and j
+    D = ht.spatial.cdist(xy_mat) # TODO: heat/scipy API inconsistency
+    # Compute the angular coefficients of the line between each pair of points
+    x, y = xy_mat[:, 0], xy_mat[:, 1]
+    x_array = ht.tile(x, reps=(x.gshape[0], 1))
+    y_array = ht.tile(y, reps=(y.gshape[0], 1))
+    dX = x_array.T - x_array.resplit_(axis=0)  # dX[i,j]: x difference between points i and j
+    dY = y_array.T - y_array.resplit_(axis=0)  # dY[i,j]: y difference between points i and j
+
+    # Compute the matrix Theta of angles between each pair of points
+    theta = ht.arctan2(dY, dX)
+
+    # Transform [-pi, pi] back to [-pi/2, pi/2]
+    where_smaller = ht.where(theta < -ht.pi / 2)._DNDarray__array.tolist()
+    where_larger = ht.where(theta > ht.pi / 2)._DNDarray__array.tolist()
+    theta[where_smaller] += ht.pi
+    theta[where_larger] -= ht.pi
+
+    # Compute the matrix of stretching factors for each pair of points
+    stretch_mat = 1 + (stretch - 1.) * ht.abs(ht.sin(alpha - theta))
+
+    # Return the stretched distance matrix
+    return D * stretch_mat
+
 
 def _interpolate_signals(signals, sampling_times, verbose=False):
     """
@@ -456,10 +530,11 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     log_1 = np.log(1.)
     # Compute the log of the integral's coefficient
     logK = np.sum(np.log(np.arange(1, n + 1)))
+
     # Add to the 3D matrix u a bottom layer equal to 0 and a
     # top layer equal to 1. Then compute the difference du along
     # the first dimension.
-    du = np.diff(u, prepend=0, append=1, axis=1)
+    du = np.diff(u, prepend = 0, append = 1, axis = 1)
 
     # precompute logarithms
     # ignore warnings about infinities, see inside the loop:
@@ -484,6 +559,7 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     # initialise probabilities to 0
     P_total = np.zeros(du.shape[0], dtype=np.float32)
     iter_id = 0
+
     for matrix_entries in tqdm(itertools.product(*lists),
                                total=it_todo,
                                desc="Joint survival function",
@@ -507,13 +583,11 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
 
         # use precomputed factorials
         sum_log_di_factorial = log_factorial[di].sum()
-
         # Compute for each i,j the contribution to the probability
         # given by this step, and add it to the total probability
 
         # Use precomputed log
         np.copyto(log_du_scratch, log_du)
-
         # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du with 1
         # whenever di_scratch = 0, so that du ** di_scratch = 1 (this avoids
         # nans when both du and di_scratch are 0, and is mathematically
@@ -523,9 +597,8 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
         di_log_du = di_scratch * log_du_scratch
         sum_di_log_du = di_log_du.sum(axis=1)
         logP = sum_di_log_du - sum_log_di_factorial
-
         P_total += np.exp(logP + logK)
-
+    
     if mpi_accelerated:
         totals = np.zeros(du.shape[0], dtype=np.float32)
 
@@ -580,20 +653,19 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
         Note: the joint probability matrix computed for the ASSET analysis
         is `1 - S`.
     """
-    num_p_vals, d = u.shape
+    num_p_vals, d = u.shape 
 
     # Define ranges [1,...,n], [2,...,n], ..., [d,...,n] for the mute variables
     # used to compute the integral as a sum over all possibilities
     lists = [range(j, n + 1) for j in range(d, 0, -1)]
-    it_todo = np.prod([n + 1 - j for j in range(d, 0, -1)])
 
-    log_1 = ht.log(ht.array(1.))
+    log_1 = ht.log(ht.array(1., dtype=ht.float64)) #TODO: ht/np inconsistency #ht.array(np.log(1.))
     # Compute the log of the integral's coefficient
-    logK = ht.sum(ht.log(ht.arange(1, n + 1)))
+    logK = ht.sum(ht.log(ht.arange(1, n + 1, dtype=ht.int64))) #TODO: ht/np arange dtype inconsistency
     # Add to the 3D matrix u a bottom layer equal to 0 and a
     # top layer equal to 1. Then compute the difference du along
     # the first dimension.
-    du = ht.diff(u, prepend=0, append=1, axis=1)
+    du = ht.diff(u, prepend = 0, append = 1, axis = 1)
 
     # precompute logarithms
     # ignore warnings about infinities, see inside the loop:
@@ -605,54 +677,154 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
         log_du = ht.log(du)
 
     # prepare arrays for usage inside the loop
-    di_scratch = ht.empty_like(du, dtype=ht.int32)
     log_du_scratch = ht.empty_like(log_du)
 
     # precompute log(factorial)s
     # pad with a zero to get 0! = 1
-    log_factorial = ht.hstack((ht.array([0]), ht.cumsum(ht.log(ht.arange(1, n + 1))))) 
+    log_factorial = ht.hstack((ht.array([0], dtype=ht.int64), ht.cumsum(ht.log(ht.arange(1, n + 1, dtype=ht.int64)))))
 
-    ## TODO: rewrite comments for heat implementation
     # compute the probabilities for each unique row of du
     # only loop over the indices and do all du entries at once
     # using matrix algebra
     # initialise probabilities to 0
-    matrix_entries = np.array(list(itertools.product(*lists)))
-    # differences
-    di = -np.diff(matrix_entries, prepend=n, append=0)
-    # discard "wrong order" entries 
-    di = di[di.min(axis=1) >= 0,:]
-    # distribute across ranks
-    di = ht.array(di, split=0)
-    # use precomputed factorials
-    vect_log_factorial = ht.empty(di.gshape[0], dtype=ht.float32, split=0)
-    vect_log_factorial = log_factorial[di]
-    vect_sum_log_di_factorial = vect_log_factorial.sum(axis=1)
-    # Use precomputed log
-    # Stack log_du  di.shape[0] times along axis 0
-    print("Copying log_du to local logs...")
-    log_du_local = [log_du for _ in trange(di.lshape[0])]
-    print("Stacking local logs...")
-    log_du_stacked = ht.stack(log_du_local, axis=0)
-    # vectorized log_du_scratch
-    vect_log_du_scratch = ht.array(log_du_stacked, is_split=0)
-    # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du with 1
-    # whenever di_scratch = 0, so that du ** di_scratch = 1 (this avoids
-    # nans when both du and di_scratch are 0, and is mathematically
-    # correct)
-    di_zero = ht.where(di == 0)._DNDarray__array  #TODO: get heat slicing to work with DNDarrays
-    #
-    vect_log_du_scratch[di_zero[:, 0],:, di_zero[:, 1]] = log_1
-    print("Multiplying each `di` entry by its `log_du`")
-    vect_di_log_du = ht.expand_dims(di, axis=1) * vect_log_du_scratch
-    print("Done di_log_du")
-    vect_sum_di_log_du = vect_di_log_du.sum(axis=2)
-    vect_logP = vect_sum_di_log_du - vect_sum_log_di_factorial.expand_dims(axis=1)
-    totals = ht.exp(vect_logP + logK).sum(axis=0)
-    print("ASSET: DONE TOTALS: shape, split", totals.shape, totals.split) 
-    return totals
+    P_total = ht.zeros(du.shape[0], dtype=ht.float32)
+
+    # heat version: distribute matrix entries across processes
+    matrix_entries = ht.array(list(itertools.product(*lists)), dtype=ht.int64, split=0)
+    # we only need the differences of the indices;
+    di_all = -1 * ht.diff(matrix_entries, prepend=n, append=0)
+    # weed out wrong order:  -diff of columns must be >= 0
+    di_array = ht.array(di_all[ht.where(di_all[:, 1:-1].min(axis=1) >= 0)._DNDarray__array,:], is_split=0)
+    # free up some space
+    del matrix_entries
+    del di_all
+    # if running on more than 1 process, at this point di_array is unevenly distributed. 
+    # Balance in place:
+    if di_array.is_distributed():
+        di_array.balance_()
+    # extract process-local lists from (distributed) di_array
+    diffs = di_array._DNDarray__array.tolist()
+    # define torch tensors for faster local calculations
+    t_log_factorial = log_factorial._DNDarray__array  
+    t_log_du = log_du._DNDarray__array
+    t_log_1 = log_1._DNDarray__array
+    t_logK = logK._DNDarray__array
+    t_P_total = P_total._DNDarray__array 
+    
+    # loop over differences on rank
+    for di in tqdm(diffs, desc="Joint survival function / heat", disable=not verbose):
+        # use precomputed factorials
+        t_sum_log_di_factorial = t_log_factorial[di].sum()
+        # Compute for each i,j the contribution to the probability
+        # given by this step, and add it to the total probability
+
+        #use precomputed log
+        t_log_du_scratch = t_log_du.detach().clone()
+        # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du column with 1
+        # whenever di = 0, so that du ** di = 1 (this avoids
+        # nans when both du and di are 0, and is mathematically
+        # correct)
+        di_zero = [i for i in range(len(di)) if di[i] == 0]
+        t_log_du_scratch[:, di_zero] = t_log_1
+        t_di = torch.tensor(di)
+        t_di_log_du = t_di * t_log_du_scratch
+        t_sum_di_log_du=t_di_log_du.sum(1)
+        t_logP=t_sum_di_log_du - t_sum_log_di_factorial
+        t_P_total += torch.exp(t_logP + t_logK)
+
+    if di_array.is_distributed():
+        totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=di_array.comm).sum(axis=0)
+        return totals
+    
+    P_total = ht.array(t_P_total, dtype=ht.float32, split=None)
+    return P_total
 
 def _pmat_neighbors(mat, filter_shape, n_largest, verbose):
+    """
+    Build the 3D matrix `L` of largest neighbors of elements in a 2D matrix
+    `mat`.
+    For each entry `mat[i, j]`, collects the `n_largest` elements with largest
+    values around `mat[i, j]`, say `z_i, i=1,2,...,n_largest`, and assigns them
+    to `L[i, j, :]`.
+    The zone around `mat[i, j]` where largest neighbors are collected from is
+    a rectangular area (kernel) of shape `(l, w) = filter_shape` centered
+    around `mat[i, j]` and aligned along the diagonal.
+    If `mat` is symmetric, only the triangle below the diagonal is considered.
+    Parameters
+    ----------
+    mat : np.ndarray
+        A square matrix of real-valued elements.
+    filter_shape : tuple of int
+        A pair of integers representing the kernel shape `(l, w)`.
+    n_largest : int
+        The number of largest neighbors to collect for each entry in `mat`.
+    verbose : bool
+        Show the progress bar or not.
+    Returns
+    -------
+    lmat : np.ndarray
+        A matrix of shape `(n_largest, l, w)` containing along the first
+        dimension `lmat[:, i, j]` the largest neighbors of `mat[i, j]`.
+    Raises
+    ------
+    ValueError
+        If `filter_shape[1]` is not lower than `filter_shape[0]`.
+    Warns
+    -----
+    UserWarning
+        If both entries in `filter_shape` are not odd values (i.e., the kernel
+        is not centered on the data point used in the calculation).
+    """
+    l, w = filter_shape
+
+    # if the matrix is symmetric the diagonal was set to 0.5
+    # when computing the probability matrix
+    symmetric = np.all(np.diagonal(mat) == 0.5)
+
+    # Check consistent arguments
+    if w >= l:
+        raise ValueError('filter_shape width must be lower than length')
+    if not ((w % 2) and (l % 2)):
+        warnings.warn('The kernel is not centered on the datapoint in whose'
+                      'calculation it is used. Consider using odd values'
+                      'for both entries of filter_shape.')
+
+    # Construct the kernel
+    filt = np.ones((l, l), dtype=np.float32)
+    filt = np.triu(filt, -w)
+    filt = np.tril(filt, w)
+
+    # Convert mat values to floats, and replaces np.infs with specified input
+    # values
+    mat = np.array(mat, dtype=np.float32)
+
+    # Initialize the matrix of d-largest values as a matrix of zeroes
+    lmat = np.zeros((n_largest, mat.shape[0], mat.shape[1]), dtype=np.float32)
+
+    N_bin_y = mat.shape[0]
+    N_bin_x = mat.shape[1]
+    # if the matrix is symmetric do not use kernel positions intersected
+    # by the diagonal
+    if symmetric:
+        bin_range_y = trange(l, N_bin_y - l + 1, disable=not verbose)
+    else:
+        bin_range_y = trange(N_bin_y - l + 1, disable=not verbose)
+        bin_range_x = trange(N_bin_x - l + 1, disable=not verbose)
+
+    # compute matrix of largest values
+    for y in bin_range_y:
+        if symmetric:
+            # x range depends on y position
+            bin_range_x = trange(y - l + 1, disable=not verbose)
+        for x in bin_range_x:
+            patch = mat[y: y + l, x: x + l]
+            mskd = np.multiply(filt, patch)
+            largest_vals = np.sort(mskd, axis=None)[-n_largest:]
+            lmat[:, y + (l // 2), x + (l // 2)] = largest_vals
+
+    return lmat
+
+def _pmat_neighbors_ht(mat, filter_shape, n_largest, verbose):
     """
     Build the 3D matrix `L` of largest neighbors of elements in a 2D matrix
     `mat`.
@@ -697,8 +869,6 @@ def _pmat_neighbors(mat, filter_shape, n_largest, verbose):
     """
     l, w = filter_shape
 
-    # TODO check that mat is a DNDarray
-
     # if the matrix is symmetric the diagonal was set to 0.5
     # when computing the probability matrix
     symmetric = ht.all(ht.diagonal(mat) == 0.5)
@@ -711,48 +881,56 @@ def _pmat_neighbors(mat, filter_shape, n_largest, verbose):
                       'calculation it is used. Consider using odd values'
                       'for both entries of filter_shape.')
 
-    # Construct the kernel
+    # Construct the kernel 
     filt = ht.ones((l, l), dtype=ht.float32) #process-local, split=None
     filt = ht.triu(filt, -w)
     filt = ht.tril(filt, w)
+    # heat: extract torch tensor for faster loop
+    t_filt = filt._DNDarray__array
 
     # Convert mat values to floats, and replaces np.infs with specified input
     # values
-    mat = ht.array(mat, dtype=ht.float32)
+    mat = mat.astype(ht.float32) # TODO: not sure this is necessary, check
 
-    # Initialize the matrix of d-largest values as a matrix of zeroes
-    lmat = ht.zeros((n_largest, mat.shape[0], mat.shape[1]), dtype=ht.float32)
+    # Initialize the TORCH TENSOR of d-largest values as a matrix of zeroes
+    # 
+    t_lmat = torch.zeros((n_largest, mat.lshape[0], mat.shape[1]), dtype=torch.float32)
 
-    N_bin_y = mat.shape[0]
+    N_bin_y = mat.lshape[0]
     N_bin_x = mat.shape[1]
     # if the matrix is symmetric do not use kernel positions intersected
     # by the diagonal
     if symmetric:
-        bin_range_y = trange(l, N_bin_y - l + 1, disable=not verbose) #trange(...) = tqdm(range(...))
+        bin_range_y = trange(l, N_bin_y - l + 1, disable=not verbose) 
     else:
         bin_range_y = trange(N_bin_y - l + 1, disable=not verbose)
         bin_range_x = trange(N_bin_x - l + 1, disable=not verbose)
+    
+    # compute matrix of largest values:
+    # heat version: get right-hand halo if necessary
+    if mat.is_distributed():
+        offset, _, _ = mat.comm.chunk(mat.gshape, mat.split)
+        mat.get_halo(l)
+        t_mat = torch.cat((mat._DNDarray__array, mat.halo_next)) if mat.halo_next is not None else mat._DNDarray__array
+    else:
+        offset = 0
+        t_mat = mat._DNDarray__array
 
-    # compute matrix of largest values
-    # TODO: heat version, is this really necessary? USE TOPK!!
+    #run loop on distributed mat
     for y in bin_range_y:
         if symmetric:
             # x range depends on y position
-            bin_range_x = trange(y - l + 1, disable=not verbose)
+            bin_range_x = trange(y+offset - l + 1, disable=not verbose)
         for x in bin_range_x:
-            patch = mat[y:y + l, x:x + l]  # TODO is mat distributed?
-            #print("patch = ", patch, patch.shape)
-            #print("filt = ", filt, filt.shape)
-            #print("bin_range_y = ", l, N_bin_y - l + 1, ", bin_range_x = ", y - l + 1)
-            mskd = ht.multiply(filt, patch)
-            #print("mskd = ", mskd, mskd.shape)
-            #heat workaround until sort() is fixed
-            largest_vals = ht.sort(mskd.flatten(), axis=None)[0][-n_largest:]
-            #print("largest_vals = ", largest_vals, len(largest_vals))
-            #print("slice = ", y + (l // 2), x + (l // 2))
-            #print("lmat.shape = ", lmat.shape)
-            lmat[:, y + (l // 2), x + (l // 2)] = largest_vals
+            t_patch = t_mat[y:y + l, x:x + l]  
+            t_mskd = t_filt * t_patch 
+            #largest_vals = ht.sort(mskd.flatten(), axis=None)[0][-n_largest:]
+            t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
+            t_lmat[:, y + (l // 2), x + (l // 2)] = t_largest_vals
             
+    # assemble local tensor t_lmat into distributed DNDarray lmat
+    # NB: lmat is distributed along mat rows, now dimension 1!
+    lmat = ht.array(t_lmat, is_split=1)
     return lmat
 
 
@@ -1651,6 +1829,166 @@ class ASSET(object):
 
         return pmat
 
+    def probability_matrix_analytical_ht(self, imat=None,
+                                      firing_rates_x='estimate',
+                                      firing_rates_y='estimate',
+                                      kernel_width=100 * pq.ms):
+        r"""
+        Given a list of spike trains, approximates the cumulative probability
+        of each entry in their intersection matrix.
+
+        The approximation is analytical and works under the assumptions that
+        the input spike trains are independent and Poisson. It works as
+        follows:
+
+            * Bin each spike train at the specified `bin_size`: this yields a
+              binary array of 1s (spike in bin) and 0s (no spike in bin;
+              clipping used);
+            * If required, estimate the rate profile of each spike train by
+              convolving the binned array with a boxcar kernel of user-defined
+              length;
+            * For each neuron `k` and each pair of bins `i` and `j`, compute
+              the probability :math:`p_ijk` that neuron `k` fired in both bins
+              `i` and `j`.
+            * Approximate the probability distribution of the intersection
+              value at `(i, j)` by a Poisson distribution with mean parameter
+              :math:`l = \sum_k (p_ijk)`,
+              justified by Le Cam's approximation of a sum of independent
+              Bernouilli random variables with a Poisson distribution.
+
+        Parameters
+        ----------
+        imat : (n,n) np.ndarray or None, optional
+            The intersection matrix of a list of spike trains.
+            It has the shape `(n, n)`, where `n` is the number of bins that
+            time was discretized in.
+            If None, the output of :func:`ASSET.intersection_matrix` is used.
+            Default: None
+        firing_rates_x, firing_rates_y : list of neo.AnalogSignal or 'estimate'
+            If a list, `firing_rates[i]` is the firing rate of the spike train
+            `spiketrains[i]`.
+            If 'estimate', firing rates are estimated by simple boxcar kernel
+            convolution, with the specified `kernel_width`.
+            Default: 'estimate'.
+        kernel_width : pq.Quantity, optional
+            The total width of the kernel used to estimate the rate profiles
+            when `firing_rates` is 'estimate'.
+            Default: 100 * pq.ms.
+
+        Returns
+        -------
+        pmat : np.ndarray
+            The cumulative probability matrix. `pmat[i, j]` represents the
+            estimated probability of having an overlap between bins `i` and `j`
+            STRICTLY LOWER than the observed overlap, under the null hypothesis
+            of independence of the input spike trains.
+        """
+        if imat is None:
+            # Compute the intersection matrix of the original data
+            imat = self.intersection_matrix()
+
+        symmetric = self.is_symmetric()
+
+        bsts_x_matrix = self.spiketrains_binned.to_bool_array()
+
+        if symmetric:
+            bsts_y_matrix = bsts_x_matrix
+        else:
+            bsts_y_matrix = self.spiketrains_binned_y.to_bool_array()
+
+            # Check that the nr. neurons is identical between the two axes
+            if bsts_x_matrix.shape[0] != bsts_y_matrix.shape[0]:
+                raise ValueError(
+                    'Different number of neurons along the x and y axis!')
+
+        # Define the firing rate profiles
+        if firing_rates_x == 'estimate':
+            # If rates are to be estimated, create the rate profiles as
+            # Quantity objects obtained by boxcar-kernel convolution
+            fir_rate_x = self._rate_of_binned_spiketrain(bsts_x_matrix,
+                                                         kernel_width)
+        elif isinstance(firing_rates_x, list):
+            # If rates provided as lists of AnalogSignals, create time slices
+            # for both axes, interpolate in the time bins of interest and
+            # convert to Quantity
+            fir_rate_x = _interpolate_signals(
+                firing_rates_x, self.spiketrains_binned.bin_edges[:-1],
+                self.verbose)
+        else:
+            raise ValueError(
+                'fir_rates_x must be a list or the string "estimate"')
+
+        if symmetric:
+            fir_rate_y = fir_rate_x
+        elif firing_rates_y == 'estimate':
+            fir_rate_y = self._rate_of_binned_spiketrain(bsts_y_matrix,
+                                                         kernel_width)
+        elif isinstance(firing_rates_y, list):
+            # If rates provided as lists of AnalogSignals, create time slices
+            # for both axes, interpolate in the time bins of interest and
+            # convert to Quantity
+            fir_rate_y = _interpolate_signals(
+                firing_rates_y, self.spiketrains_binned_y.bin_edges[:-1],
+                self.verbose)
+        else:
+            raise ValueError(
+                'fir_rates_y must be a list or the string "estimate"')
+
+        # For each neuron, compute the prob. that that neuron spikes in any bin
+        if self.verbose:
+            print('compute the prob. that each neuron fires in each pair of '
+                  'bins...')
+
+        spike_probs_x = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
+            pq.dimensionless).magnitude)) for rate in fir_rate_x]
+        if symmetric:
+            spike_probs_y = spike_probs_x
+        else:
+            spike_probs_y = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
+                pq.dimensionless).magnitude)) for rate in fir_rate_y]
+
+        # For each neuron k compute the matrix of probabilities p_ijk that
+        # neuron k spikes in both bins i and j. (For i = j it's just spike
+        # probs[k][i])
+        spike_prob_mats = [np.outer(probx, proby) for (probx, proby) in
+                           zip(spike_probs_x, spike_probs_y)]
+
+        # Compute the matrix Mu[i, j] of parameters for the Poisson
+        # distributions which describe, at each (i, j), the approximated
+        # overlap probability. This matrix is just the sum of the probability
+        # matrices computed above
+
+        if self.verbose:
+            print(
+                "compute the probability matrix by Le Cam's approximation...")
+
+        
+        Mu = np.sum(spike_prob_mats, axis=0)
+
+        # Compute the probability matrix obtained from imat using the Poisson
+        # pdfs
+
+        # use heat for distributed computation
+        # distribute data:
+        Mu = ht.array(Mu, split=0)
+        imat = ht.array(imat, split=0)
+        
+        # Compute the probability matrix obtained from imat using the Poisson
+        # pdfs
+
+        l_pmat = torch.tensor(scipy.stats.poisson.cdf(imat._DNDarray__array.numpy() - 1, Mu._DNDarray__array.numpy()))
+        pmat = ht.array(l_pmat, dtype=ht.float32, is_split=0, comm=imat.comm)
+
+        if symmetric:
+            # Substitute 0.5 to the elements along the main diagonal
+            if self.verbose:
+                print("substitute 0.5 to elements along the main diagonal...")
+            #ht.fill_diagonal(pmat, 0.5)
+            pmat.fill_diagonal(0.5)
+
+        # NB pmat is distributed if size > 1
+        return pmat
+
     def joint_probability_matrix(self, pmat, filter_shape, n_largest,
                                  min_p_value=1e-5):
         """
@@ -1695,17 +2033,15 @@ class ASSET(object):
         pmat_neighb = _pmat_neighbors(
             pmat, filter_shape=filter_shape, n_largest=n_largest,
             verbose=self.verbose)
-
         pmat_neighb = np.minimum(pmat_neighb, 1. - min_p_value)
 
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
         # and store the corresponding indices
         # flatten the second and third dimension in order to use np.unique
-        pmat_neighb = pmat_neighb.reshape(n_largest, pmat.size).T
+        pmat_neighb=pmat_neighb.reshape(n_largest, pmat.size).T
         pmat_neighb, pmat_neighb_indices = np.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
-
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
@@ -1730,7 +2066,6 @@ class ASSET(object):
         aligned along the diagonal where `pmat[i, j]` lies into, extracts the
         `n_largest` values falling within the kernel and computes their joint
         p-value `jmat[i, j]`.
-        # TODO heat version: map filter_shape across processes, run in parallel, halo?
 
         Parameters
         ----------
@@ -1763,32 +2098,35 @@ class ASSET(object):
 
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
-        pmat_neighb = _pmat_neighbors(
+        pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest,
             verbose=self.verbose)
+        pmat_neighb=ht.minimum(pmat_neighb, ht.array(np.array(1. - min_p_value)))
 
-        pmat_neighb = ht.minimum(ht.array(pmat_neighb), 1. - ht.array(min_p_value))
+        # gather pmat_neighb, it will go into _jsf_uniform_orderstat_3d_ht() as 
+        # process-local DNDarray
+        pmat_neighb.resplit_(axis=None)
+
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
         # and store the corresponding indices
         # flatten the second and third dimension in order to use np.unique
         pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size)).T
-        print("pmat_neighb BEFORE UNIQUE= ", pmat_neighb, pmat_neighb.shape)
-        # TODO: fix ht.unique
-        pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, sorted=True,
+        pmat_neighb, t_pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, sorted=True,
                                                      return_inverse=True)
-        print("pmat_neighb AFTER UNIQUE= ", pmat_neighb, pmat_neighb.shape)
+
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
         jpvmat = _jsf_uniform_orderstat_3d_ht(pmat_neighb, n,
                                            verbose=self.verbose)
-        
-        print("ASSET: jpvmat == jpvmat_ht: ", jpvmat == jpvmat_ht)
-        # restore the original shape using the stored indices
-        jpvmat = jpvmat[pmat_neighb_indices].reshape(pmat.shape)
 
-        return 1. - jpvmat # this should be a DNDarray
+        # restore the original shape using the stored indices
+        jpvmat=jpvmat[t_pmat_neighb_indices.tolist()].reshape(pmat.shape)
+        # distribute jpvmat to match pmat distribution
+        jpvmat.resplit_(axis=pmat.split)
+
+        return 1. - jpvmat
 
     @staticmethod
     def mask_matrices(matrices, thresholds):
@@ -1842,6 +2180,62 @@ class ASSET(object):
 
         # Replace nans, coming from False * np.inf, with zeros
         mask[np.isnan(mask)] = False
+
+        return mask
+
+    @staticmethod
+    def mask_matrices_ht(matrices, thresholds):
+        """
+        Given a list of `matrices` and a list of `thresholds`, return a boolean
+        matrix `B` ("mask") such that `B[i,j]` is True if each input matrix in
+        the list strictly exceeds the corresponding threshold at that position.
+        If multiple matrices are passed along with only one threshold the same
+        threshold is applied to all matrices.
+
+        Parameters
+        ----------
+        matrices : list of np.ndarray
+            The matrices which are compared to the respective thresholds to
+            build the mask. All matrices must have the same shape.
+            Typically, it is a list `[pmat, jmat]`, i.e., the (cumulative)
+            probability and joint probability matrices.
+        thresholds : float or list of float
+            The significance thresholds for each matrix in `matrices`.
+
+        Returns
+        -------
+        mask : np.ndarray
+            Boolean mask matrix with the shape of the input matrices.
+
+        Raises
+        ------
+        ValueError
+            If `matrices` or `thresholds` is an empty list.
+
+            If `matrices` and `thresholds` have different lengths.
+
+        See Also
+        --------
+        ASSET.probability_matrix_montecarlo : for `pmat` generation
+        ASSET.probability_matrix_analytical : for `pmat` generation
+        ASSET.joint_probability_matrix : for `jmat` generation
+
+        """
+        if len(matrices) == 0:
+            raise ValueError("Empty list of matrices")
+        if isinstance(thresholds, float):
+            thresholds = ht.full(shape=len(matrices), fill_value=thresholds)
+        if len(matrices) != len(thresholds):
+            raise ValueError(
+                '`matrices` and `thresholds` must have same length')
+
+        mask = ht.ones_like(matrices[0], dtype=ht.int64)
+        for (mat, thresh) in zip(matrices, thresholds):
+            mask &= mat > thresh
+
+        # Replace nans, coming from False * np.inf, with zeros
+        mask_isnan = ht.where(mask == ht.nan)._DNDarray__array
+        mask[mask_isnan] = False
 
         return mask
 
@@ -1942,6 +2336,127 @@ class ASSET(object):
         cluster_mat[xpos_sgnf, ypos_sgnf] = \
             config * (config == -1) + (config + 1) * (config >= 0)
 
+        return cluster_mat
+
+    @staticmethod
+    def cluster_matrix_entries_ht(mask_matrix, max_distance, min_neighbors,
+                               stretch):
+        r"""
+        Given a matrix `mask_matrix`, replaces its positive elements with
+        integers representing different cluster IDs. Each cluster comprises
+        close-by elements.
+
+        In ASSET analysis, `mask_matrix` is a thresholded ("masked") version
+        of the intersection matrix `imat`, whose values are those of `imat`
+        only if considered statistically significant, and zero otherwise.
+
+        A cluster is built by pooling elements according to their distance,
+        via the DBSCAN algorithm (see `sklearn.cluster.DBSCAN` class). Elements
+        form a neighbourhood if at least one of them has a distance not larger
+        than `max_distance` from the others, and if they are at least
+        `min_neighbors`. Overlapping neighborhoods form a cluster:
+
+            * Clusters are assigned integers from `1` to the total number `k`
+              of clusters;
+            * Unclustered ("isolated") positive elements of `mask_matrix` are
+              assigned value `-1`;
+            * Non-positive elements are assigned the value `0`.
+
+        The distance between the positions of two positive elements in
+        `mask_matrix` is given by a Euclidean metric which is stretched if the
+        two positions are not aligned along the 45 degree direction (the main
+        diagonal direction), as more, with maximal stretching along the
+        anti-diagonal. Specifically, the Euclidean distance between positions
+        `(i1, j1)` and `(i2, j2)` is stretched by a factor
+
+        .. math::
+                 1 + (\mathtt{stretch} - 1.) *
+                 \left|\sin((\pi / 4) - \theta)\right|,
+
+        where :math:`\theta` is the angle between the pixels and the 45 degree
+        direction. The stretching factor thus varies between 1 and `stretch`.
+
+        Parameters
+        ----------
+        mask_matrix : np.ndarray
+            The boolean matrix, whose elements with positive values are to be
+            clustered. The output of :func:`ASSET.mask_matrices`.
+        max_distance : float
+            The maximum distance between two elements in `mask_matrix` to be
+            a part of the same neighbourhood in the DBSCAN algorithm.
+        min_neighbors : int
+            The minimum number of elements to form a neighbourhood.
+        stretch : float
+            The stretching factor of the euclidean metric for elements aligned
+            along the 135 degree direction (anti-diagonal). The actual
+            stretching increases from 1 to `stretch` as the direction of the
+            two elements moves from the 45 to the 135 degree direction.
+            `stretch` must be greater than 1.
+
+        Returns
+        -------
+        cluster_mat : np.ndarray
+            A matrix with the same shape of `mask_matrix`, each of whose
+            elements is either:
+
+                * a positive integer (cluster ID) if the element is part of a
+                  cluster;
+                * `0` if the corresponding element in `mask_matrix` is
+                  non-positive;
+                * `-1` if the element does not belong to any cluster.
+
+        See Also
+        --------
+        sklearn.cluster.DBSCAN
+
+        """
+        # Don't do anything if mat is identically zero
+        if ht.all(mask_matrix == 0):
+            return mask_matrix
+
+        # List the significant pixels of mat in a 2-columns array
+        local_pos_sgnf = ht.where(mask_matrix > 0)
+        t_local_pos_sgnf = local_pos_sgnf._DNDarray__array
+        t_x, t_y = t_local_pos_sgnf[:, 0], t_local_pos_sgnf[:, 1]
+        if local_pos_sgnf.is_distributed():
+            # local_pos_sgnf is unevenly distributed, we need this information later
+            # store unbalanced slice information and share among ranks
+            t_local_slice = torch.tensor(local_pos_sgnf.lshape[local_pos_sgnf.split], dtype=torch.int64)
+            t_global_slices = torch.zeros(size, dtype=torch.int64)
+            local_pos_sgnf.comm.Allgather(t_local_slice, t_global_slices)
+            global_slices = torch.cat((torch.tensor([0]),  torch.cumsum(t_global_slices, dim=0))).tolist() 
+        else:
+            global_slices = list(0, local_pos_sgnf.gshape[local_pos_sgnf.split])
+        
+        # balance local_pos_sgnf for upcoming distributed operations
+        # TODO check that we really need to have a copy here
+        pos_sgnf = local_pos_sgnf.copy()
+        pos_sgnf.balance_()
+
+        # Compute the matrix D[i, j] of euclidean distances between pixels i
+        # and j
+        D = _stretched_metric_2d_ht(
+            pos_sgnf, stretch=stretch, ref_angle=45)
+
+        # NB: switching back to numpy for dbscan. TODO: ht.dbscan 
+        # Cluster positions of significant pixels via dbscan
+        np_D = D.numpy()
+        np_core_samples, np_config = dbscan(
+            np_D, eps=max_distance, min_samples=min_neighbors,
+            metric='precomputed')
+            
+        # Construct the clustered matrix, where each element has value
+        # * i = 1 to k if it belongs to a cluster i,
+        # * 0 if it is not significant,
+        # * -1 if it is significant but does not belong to any cluster
+        cluster_mat = ht.zeros_like(mask_matrix, dtype=ht.int32)
+
+        # config must match process-local slice of cluster_mat
+        config_slice = slice(global_slices[rank], global_slices[rank+1])
+        
+        config = ht.array((np_config * (np_config == -1) + (np_config + 1) * (np_config >= 0))[config_slice], dtype=ht.int32)
+        cluster_mat[t_x, t_y] = config
+        
         return cluster_mat
 
     def extract_synchronous_events(self, cmat, ids=None):
