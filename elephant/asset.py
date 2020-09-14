@@ -116,8 +116,7 @@ import sys
 sys.path.append("heat/")
 import heat as ht
 import torch
-import time
-
+import itertools
 
 try:
     from mpi4py import MPI
@@ -639,6 +638,7 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         log_du = np.log(du)
+        print("ASSET: log_du.dtype = ", log_du.dtype)
 
     # prepare arrays for usage inside the loop
     di_scratch = np.empty_like(du, dtype=np.int32)
@@ -744,15 +744,19 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
 
     # Define ranges [1,...,n], [2,...,n], ..., [d,...,n] for the mute variables
     # used to compute the integral as a sum over all possibilities
-    lists = [range(j, n + 1) for j in range(d, 0, -1)]
 
-    log_1 = ht.log(ht.array(1., dtype=ht.float64)) #TODO: ht/np inconsistency #ht.array(np.log(1.))
+    #lists = [range(j, n + 1) for j in range(d, 0, -1)]
+    lists = list(_combinations_with_replacement(n, d=d))
+
+    # torch tensors for local operations:
+    t_log_1 = torch.log(torch.tensor([1], dtype=torch.float64))
     # Compute the log of the integral's coefficient
-    logK = ht.sum(ht.log(ht.arange(1, n + 1, dtype=ht.int64))) #TODO: ht/np arange dtype inconsistency
+    t_logK = torch.sum(torch.log(torch.arange(1, n + 1).type(torch.float64)))
+
     # Add to the 3D matrix u a bottom layer equal to 0 and a
     # top layer equal to 1. Then compute the difference du along
     # the first dimension.
-    du = ht.diff(u, prepend = 0, append = 1, axis = 1)
+    t_du = ht.diff(u, prepend = 0, append = 1, axis = 1)._DNDarray__array
 
     # precompute logarithms
     # ignore warnings about infinities, see inside the loop:
@@ -761,51 +765,34 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
     # exp(ln(0)) = exp(-inf) = 0
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        log_du = ht.log(du)
+        t_log_du = torch.log(t_du)
 
     # prepare arrays for usage inside the loop
-    log_du_scratch = ht.empty_like(log_du)
+    t_log_du_scratch = torch.empty_like(t_log_du)
 
     # precompute log(factorial)s
     # pad with a zero to get 0! = 1
-    log_factorial = ht.hstack((ht.array([0], dtype=ht.int64), ht.cumsum(ht.log(ht.arange(1, n + 1, dtype=ht.int64)))))
-
+    t_log_factorial = torch.cat((torch.tensor([0], dtype=torch.float64), torch.cumsum(torch.log(torch.arange(1, n + 1).type(torch.float64)),0)))
+    
     # compute the probabilities for each unique row of du
     # only loop over the indices and do all du entries at once
     # using matrix algebra
     # initialise probabilities to 0
-    P_total = ht.zeros(du.shape[0], dtype=ht.float32)
+    t_P_total = torch.zeros(t_du.shape[0], dtype=torch.float32)
 
     # heat version: distribute matrix entries across processes
-    matrix_entries = ht.array(list(itertools.product(*lists)), dtype=ht.int64, split=0)
+    matrix_entries = ht.array(lists, split=0)
     # we only need the differences of the indices;
-    di_all = -1 * ht.diff(matrix_entries, prepend=n, append=0)
-    # weed out wrong order:  -diff of columns must be >= 0
-    di_array = ht.array(di_all[ht.where(di_all[:, 1:-1].min(axis=1) >= 0)._DNDarray__array,:], is_split=0)
-    # free up some space
-    del matrix_entries
-    del di_all
-    # if running on more than 1 process, at this point di_array is unevenly distributed. 
-    # Balance in place:
-    if di_array.is_distributed():
-        di_array.balance_()
-    # extract process-local lists from (distributed) di_array
-    diffs = di_array._DNDarray__array.tolist()
-    # define torch tensors for faster local calculations
-    t_log_factorial = log_factorial._DNDarray__array  
-    t_log_du = log_du._DNDarray__array
-    t_log_1 = log_1._DNDarray__array
-    t_logK = logK._DNDarray__array
-    t_P_total = P_total._DNDarray__array 
+    diffs = (-1 * ht.diff(matrix_entries, prepend=n, append=0))._DNDarray__array.tolist()
     
     # loop over differences on rank
     for di in tqdm(diffs, desc="Joint survival function / heat", disable=not verbose):
         # use precomputed factorials
         t_sum_log_di_factorial = t_log_factorial[di].sum()
+
         # Compute for each i,j the contribution to the probability
         # given by this step, and add it to the total probability
-
-        #use precomputed log
+        # use precomputed log
         t_log_du_scratch = t_log_du.detach().clone()
         # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du column with 1
         # whenever di = 0, so that du ** di = 1 (this avoids
@@ -819,12 +806,11 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
         t_logP=t_sum_di_log_du - t_sum_log_di_factorial
         t_P_total += torch.exp(t_logP + t_logK)
 
-    if di_array.is_distributed():
-        totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=di_array.comm).sum(axis=0)
-        return totals
-    
-    P_total = ht.array(t_P_total, dtype=ht.float32, split=None)
-    return P_total
+    if size == 1:
+        return ht.array(t_P_total, dtype=ht.float32)
+    else:
+        totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=matrix_entries.comm).sum(axis=0)
+    return totals
 
 def _pmat_neighbors(mat, filter_shape, n_largest):
     """
@@ -987,10 +973,10 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     # if the matrix is symmetric do not use kernel positions intersected
     # by the diagonal
     if symmetric:
-        bin_range_y = trange(l, N_bin_y - l + 1, disable=not verbose) 
+        bin_range_y = range(l, N_bin_y - l + 1) 
     else:
-        bin_range_y = trange(N_bin_y - l + 1, disable=not verbose)
-        bin_range_x = trange(N_bin_x - l + 1, disable=not verbose)
+        bin_range_y = range(N_bin_y - l + 1)
+        bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values:
     # heat version: get right-hand halo if necessary
@@ -1006,7 +992,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     for y in bin_range_y:
         if symmetric:
             # x range depends on y position
-            bin_range_x = trange(y+offset - l + 1, disable=not verbose)
+            bin_range_x = range(y+offset - l + 1)
         for x in bin_range_x:
             t_patch = t_mat[y:y + l, x:x + l]  
             t_mskd = t_filt * t_patch 
@@ -1965,12 +1951,12 @@ class ASSET(object):
 
         symmetric = self.is_symmetric()
 
-        bsts_x_matrix = self.spiketrains_binned.to_bool_array()
+        bsts_x_matrix = self.spiketrains_binned_i.to_bool_array()
 
         if symmetric:
             bsts_y_matrix = bsts_x_matrix
         else:
-            bsts_y_matrix = self.spiketrains_binned_y.to_bool_array()
+            bsts_y_matrix = self.spiketrains_binned_j.to_bool_array()
 
             # Check that the nr. neurons is identical between the two axes
             if bsts_x_matrix.shape[0] != bsts_y_matrix.shape[0]:
@@ -1988,7 +1974,7 @@ class ASSET(object):
             # for both axes, interpolate in the time bins of interest and
             # convert to Quantity
             fir_rate_x = _interpolate_signals(
-                firing_rates_x, self.spiketrains_binned.bin_edges[:-1],
+                firing_rates_x, self.spiketrains_binned_i.bin_edges[:-1],
                 self.verbose)
         else:
             raise ValueError(
@@ -2004,7 +1990,7 @@ class ASSET(object):
             # for both axes, interpolate in the time bins of interest and
             # convert to Quantity
             fir_rate_y = _interpolate_signals(
-                firing_rates_y, self.spiketrains_binned_y.bin_edges[:-1],
+                firing_rates_y, self.spiketrains_binned_j.bin_edges[:-1],
                 self.verbose)
         else:
             raise ValueError(
@@ -2173,8 +2159,7 @@ class ASSET(object):
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
-            pmat, filter_shape=filter_shape, n_largest=n_largest,
-            verbose=self.verbose)
+            pmat, filter_shape=filter_shape, n_largest=n_largest)
         pmat_neighb=ht.minimum(pmat_neighb, ht.array(np.array(1. - min_p_value)))
 
         # gather pmat_neighb, it will go into _jsf_uniform_orderstat_3d_ht() as 
