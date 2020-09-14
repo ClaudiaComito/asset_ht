@@ -631,7 +631,7 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
 
     Parameters
     ----------
-    u : (A,d) np.ndarray
+    u : (A,d) ht.dndarray, process-local (u.split = None)
         2D matrix of floats between 0 and 1.
         Each row `u_i` is an array of length `d`, considered a set of
         `d` largest order statistics extracted from a sample of `n` random
@@ -647,7 +647,7 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
 
     Returns
     -------
-    P_total : (A,) np.ndarray
+    P_total : (A,) ht.dndarray
         Matrix of joint survival probabilities. `s_ij` is the joint survival
         probability of the values `{u_ijk, k=0, ..., d-1}`.
         Note: the joint probability matrix computed for the ASSET analysis
@@ -840,8 +840,9 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest, verbose):
 
     Parameters
     ----------
-    mat : np.ndarray
-        A square matrix of real-valued elements.
+    mat : ht.dndarray
+        A square matrix of real-valued elements, distributed along axis 0
+        (mat.split = 0) if comm.Get_size() > 1.
     filter_shape : tuple of int
         A pair of integers representing the kernel shape `(l, w)`.
     n_largest : int
@@ -851,9 +852,11 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest, verbose):
 
     Returns
     -------
-    lmat : np.ndarray
+    lmat : ht.dndarray
         A matrix of shape `(n_largest, l, w)` containing along the first
         dimension `lmat[:, i, j]` the largest neighbors of `mat[i, j]`.
+        The data are distributed according to mat, with mat.split=0
+        corresponding to lmat.split=1. 
 
     Raises
     ------
@@ -1877,11 +1880,13 @@ class ASSET(object):
 
         Returns
         -------
-        pmat : np.ndarray
+        pmat : ht.dndarray
             The cumulative probability matrix. `pmat[i, j]` represents the
             estimated probability of having an overlap between bins `i` and `j`
             STRICTLY LOWER than the observed overlap, under the null hypothesis
             of independence of the input spike trains.
+            If comm.Get_size() > 1, pmat is distributed along the first axis
+            (pmat.split=0)
         """
         if imat is None:
             # Compute the intersection matrix of the original data
@@ -1947,11 +1952,18 @@ class ASSET(object):
             spike_probs_y = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
                 pq.dimensionless).magnitude)) for rate in fir_rate_y]
 
+        # switch to heat: distribute data evenly among ranks, extract local torch tensors
+        t_spike_probs_x = ht.array(spike_probs_x, split=0)._DNDarray__array
+        t_spike_probs_y = ht.array(spike_probs_x, split=0)._DNDarray__array
+
         # For each neuron k compute the matrix of probabilities p_ijk that
         # neuron k spikes in both bins i and j. (For i = j it's just spike
         # probs[k][i])
-        spike_prob_mats = [np.outer(probx, proby) for (probx, proby) in
-                           zip(spike_probs_x, spike_probs_y)]
+
+        # use torch for local outer product 
+        t_spike_prob_mats = torch.einsum("ki,kj->kij", t_spike_probs_x, t_spike_probs_y)
+        # wrap into distributed ht.dndarray
+        spike_prob_mats = ht.array(t_spike_prob_mats, is_split=0)
 
         # Compute the matrix Mu[i, j] of parameters for the Poisson
         # distributions which describe, at each (i, j), the approximated
@@ -1962,31 +1974,22 @@ class ASSET(object):
             print(
                 "compute the probability matrix by Le Cam's approximation...")
 
-        
-        Mu = np.sum(spike_prob_mats, axis=0)
+        # reduction operation along split axis: Mu will be local (Mu.split=None)
+        Mu = ht.sum(spike_prob_mats, axis=0)
 
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
+        # NB imat is correctly still a np.ndarray
 
-        # use heat for distributed computation
-        # distribute data:
-        Mu = ht.array(Mu, split=0)
-        imat = ht.array(imat, split=0)
-        
-        # Compute the probability matrix obtained from imat using the Poisson
-        # pdfs
-
-        l_pmat = torch.tensor(scipy.stats.poisson.cdf(imat._DNDarray__array.numpy() - 1, Mu._DNDarray__array.numpy()))
-        pmat = ht.array(l_pmat, dtype=ht.float32, is_split=0, comm=imat.comm)
+        np_pmat = scipy.stats.poisson.cdf(imat - 1, Mu.numpy())
+        pmat = ht.array(np_pmat, dtype=ht.float32, split=0)
 
         if symmetric:
             # Substitute 0.5 to the elements along the main diagonal
             if self.verbose:
                 print("substitute 0.5 to elements along the main diagonal...")
-            #ht.fill_diagonal(pmat, 0.5)
             pmat.fill_diagonal(0.5)
 
-        # NB pmat is distributed if size > 1
         return pmat
 
     def joint_probability_matrix(self, pmat, filter_shape, n_largest,
