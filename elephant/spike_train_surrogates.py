@@ -73,7 +73,9 @@ __all__ = [
     "shuffle_isis",
     "dither_spike_train",
     "jitter_spikes",
+    "bin_shuffling",
     "JointISI",
+    "trial_shifting",
     "surrogates"
 ]
 
@@ -1002,7 +1004,7 @@ class JointISI(object):
                 diagonal = np.diagonal(
                     rotated_jisih, offset=-self.n_bins + double_index + 1)
                 jisih_cum = self._normalize_cumulative_distribution(
-                    np.cumsum(diagonal))
+                    np.r_[0., np.cumsum(diagonal)])
                 self._jisih_cumulatives.append(jisih_cum)
             self._jisih_cumulatives = np.array(
                 self._jisih_cumulatives, dtype=object)
@@ -1037,19 +1039,21 @@ class JointISI(object):
         # double_index corresponds to the sum of the indices for the previous
         # and the subsequent ISI.
         for double_index in range(self.n_bins):
-            cum_diag = np.cumsum(np.diagonal(rotated_jisih,
-                                             - self.n_bins
-                                             + double_index + 1))
+            anti_diagonal = np.diagonal(
+                rotated_jisih, - self.n_bins + double_index + 1)
 
             right_padding = jisih_diag_cums.shape[1] - \
-                len(cum_diag) - self._max_change_index
+                len(anti_diagonal) - self._max_change_index
 
-            jisih_diag_cums[double_index] = np.pad(
-                cum_diag,
+            cumulated_diagonal = np.cumsum(anti_diagonal)
+
+            padded_cumulated_diagonal = np.pad(
+                cumulated_diagonal,
                 pad_width=(self._max_change_index, right_padding),
                 mode='constant',
-                constant_values=(cum_diag[0], cum_diag[-1])
-            )
+                constant_values=(0., cumulated_diagonal[-1]))
+
+            jisih_diag_cums[double_index] = padded_cumulated_diagonal
 
         return jisih_diag_cums
 
@@ -1087,7 +1091,7 @@ class JointISI(object):
             if self.method == 'fast':
                 cum_dist_func = self._jisih_cumulatives[
                     double_index]
-                compare_isi = self._index_to_isi(curr_isi_id)
+                compare_isi = self._index_to_isi(curr_isi_id + 1)
             else:
                 cum_dist_func = self._jisih_cumulatives[
                     curr_isi_id][next_isi_id]
@@ -1097,7 +1101,8 @@ class JointISI(object):
                 # when the method is 'fast', new_isi_id is where the current
                 # ISI id should go to.
                 new_isi_id = np.searchsorted(cum_dist_func, random.random())
-                step = self._index_to_isi(new_isi_id) - compare_isi
+                step = self._index_to_isi(new_isi_id)\
+                    - compare_isi
                 return step
 
         return self._uniform_dither_not_jisi_movable_spikes(
@@ -1355,10 +1360,9 @@ def surrogates(
                          "is not valid".format(method))
     method = surrogate_types[method]
 
-    # PYTHON2: replace with inspect.signature()
     if dt is None and method not in (randomise_spikes, shuffle_isis):
-        raise ValueError("{}() method requires 'dt' parameter to be "
-                         "not None".format(method.__name__))
+        raise ValueError(f"'{method.__name__}' method requires 'dt' parameter "
+                         f"to be set")
 
     if method in (dither_spike_train, dither_spikes):
         return method(
@@ -1376,16 +1380,19 @@ def surrogates(
     if method is bin_shuffling:
         binned_spiketrain = conv.BinnedSpikeTrain(
             spiketrain, bin_size=kwargs['bin_size'])
-        bin_grid = binned_spiketrain.bin_centers.simplified.magnitude
+        bin_size = binned_spiketrain._bin_size
+        # bin_centers share the same units as bin_size
+        bin_grid = binned_spiketrain.bin_centers.magnitude
         max_displacement = int(
-            dt.simplified.magnitude / kwargs['bin_size'].simplified.magnitude)
-        binned_surrogates = method(
-            binned_spiketrain, max_displacement, n_surrogates=n_surrogates)
+            dt.rescale(binned_spiketrain.units).item() / bin_size)
+        binned_surrogates = bin_shuffling(binned_spiketrain,
+                                          max_displacement=max_displacement,
+                                          n_surrogates=n_surrogates)
         surrogate_spiketrains = \
-            [neo.SpikeTrain(bin_grid[binned_surr.to_bool_array()[0]] * pq.s,
+            [neo.SpikeTrain(bin_grid[binned_surr.sparse_matrix.nonzero()[1]],
                             t_start=spiketrain.t_start,
                             t_stop=spiketrain.t_stop,
-                            units=spiketrain.units,
+                            units=binned_spiketrain.units,
                             sampling_rate=spiketrain.sampling_rate)
              for binned_surr in binned_surrogates]
         return surrogate_spiketrains
