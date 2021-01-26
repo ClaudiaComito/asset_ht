@@ -744,10 +744,7 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
 
     # Define ranges [1,...,n], [2,...,n], ..., [d,...,n] for the mute variables
     # used to compute the integral as a sum over all possibilities
-
-    #lists = [range(j, n + 1) for j in range(d, 0, -1)]
-    lists = list(_combinations_with_replacement(n, d=d))
-
+                    
     # torch tensors for local operations:
     t_log_1 = torch.log(torch.tensor([1], dtype=torch.float64))
     # Compute the log of the integral's coefficient
@@ -780,11 +777,18 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
     # initialise probabilities to 0
     t_P_total = torch.zeros(t_du.shape[0], dtype=torch.float32)
 
-    # heat version: distribute matrix entries across processes
-    matrix_entries = ht.array(lists, split=0)
+    # distribute matrix entries across processes: TODO abstract into ht.fromiter() 
+    tot_combs = sum(1 for _ in _combinations_with_replacement(n, d = d))
+    offset, combs_lshape, combs_slice = u.comm.chunk((tot_combs,), 0)
+    combs_lshape = combs_lshape + (d,)
+    t_lcombs = torch.empty(combs_lshape, dtype=torch.int64)
+    for i, c in enumerate(_combinations_with_replacement(n, d = d)):
+        if i in range(combs_slice[0].start, combs_slice[0].stop):
+            t_lcombs[i-offset] = torch.tensor(c, dtype=torch.int64).reshape(1, d)
+
+    matrix_entries = ht.array(t_lcombs, is_split=0)
     # we only need the differences of the indices;
     diffs = (-1 * ht.diff(matrix_entries, prepend=n, append=0))._DNDarray__array.tolist()
-    
     # loop over differences on rank
     for di in tqdm(diffs, desc="Joint survival function / heat", disable=not verbose):
         # use precomputed factorials
@@ -809,7 +813,7 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
     if size == 1:
         return ht.array(t_P_total, dtype=ht.float32)
     else:
-        totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=matrix_entries.comm).sum(axis=0)
+        totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=u.comm).sum(axis=0)
     return totals
 
 def _pmat_neighbors(mat, filter_shape, n_largest):
