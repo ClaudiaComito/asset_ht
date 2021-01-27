@@ -1424,7 +1424,6 @@ def _intersection_matrix(spiketrains, spiketrains_y, bin_size, t_start_x,
     # 'A1' property returns self as a flattened ndarray.
     spikes_per_bin_x = bsts_x.sum(axis=0).A1
     spikes_per_bin_y = bsts_y.sum(axis=0).A1
-
     # Compute the intersection matrix imat
     imat = bsts_x.T.dot(bsts_y).toarray().astype(np.float32)
     for ii in range(bsts_x.shape[1]):
@@ -1459,6 +1458,68 @@ def _intersection_matrix(spiketrains, spiketrains_y, bin_size, t_start_x,
     # x and y axes, respectively.
     return imat
 
+def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
+                         t_start_y, t_stop_x, t_stop_y, normalization=None):
+    if spiketrains_y is None:
+        spiketrains_y = spiketrains
+
+    # Compute the binned spike train matrices, along both time axes
+    spiketrains_binned = conv.BinnedSpikeTrain(
+        spiketrains, bin_size=bin_size,
+        t_start=t_start_x, t_stop=t_stop_x)
+    spiketrains_binned_y = conv.BinnedSpikeTrain(
+        spiketrains_y, bin_size=bin_size,
+        t_start=t_start_y, t_stop=t_stop_y)
+
+    # Compute imat by matrix multiplication
+    bsts_x = spiketrains_binned.sparse_matrix
+    bsts_y = spiketrains_binned_y.sparse_matrix
+
+    # Compute the number of spikes in each bin, for both time axes
+    # 'A1' property returns self as a flattened ndarray.
+    spikes_per_bin_x = bsts_x.sum(axis=0).A1
+    spikes_per_bin_y = bsts_y.sum(axis=0).A1
+    # Compute the intersection matrix imat (Compressed Sparse Column format)  
+    csc_imat = bsts_x.T.dot(bsts_y)
+    # Return evenly distributed dense imat as DNDarray (split along columns)
+    _, _, lslice = ht.communication.MPI_WORLD.chunk(csc_imat.shape, split=1)
+    imat = ht.array(csc_imat[:, lslice[1]].toarray().astype(np.float32), is_split=1)
+
+    for ii in range(bsts_x.shape[1]):
+        # Normalize the row
+        col_sum = bsts_x[:, ii].sum()
+        if normalization is None or col_sum == 0:
+            norm_coef = 1.
+        elif normalization == 'intersection':
+            norm_coef = np.minimum(
+                spikes_per_bin_x[ii], spikes_per_bin_y)
+        elif normalization == 'mean':
+            # geometric mean
+            norm_coef = np.sqrt(
+                spikes_per_bin_x[ii] * spikes_per_bin_y)
+        elif normalization == 'union':
+            norm_coef = np.array([(bsts_x[:, ii]
+                                   + bsts_y[:, jj]).count_nonzero()
+                                  for jj in range(bsts_y.shape[1])])
+        else:
+            raise ValueError(
+                "Invalid parameter 'norm': {}".format(normalization))
+
+        # If normalization required, for each j such that bsts_y[j] is
+        # identically 0 the code above sets imat[:, j] to identically nan.
+        # Substitute 0s instead.
+        # imat[ii, :] = np.divide(imat[ii, :], norm_coef,
+        #                         out=np.zeros(imat.shape[1],
+        #                                      dtype=np.float32),
+        #                         where=norm_coef != 0)
+        #TODO implement ht.divide
+        # heat/torch workaround
+        if norm_coef != 0:
+            imat.larray[ii, :] = torch.true_divide(imat.larray[ii, :], torch.tensor(norm_coef))
+
+    # Return the intersection matrix and the edges of the bins used for the
+    # x and y axes, respectively.
+    return imat
 
 class ASSET(object):
     """
@@ -1612,6 +1673,51 @@ class ASSET(object):
 
         """
         imat = _intersection_matrix(self.spiketrains_i, self.spiketrains_j,
+                                    self.bin_size,
+                                    self.t_start_i, self.t_start_j,
+                                    self.t_stop_i, self.t_stop_j,
+                                    normalization=normalization)
+        return imat
+
+    def intersection_matrix_ht(self, normalization=None):
+        """
+        Generates the intersection matrix from a list of spike trains.
+
+        Given a list of `neo.SpikeTrain`, consider two binned versions of them
+        differing for the starting and ending times of the binning:
+        `t_start_x`, `t_stop_x`, `t_start_y` and `t_stop_y` respectively (the
+        time intervals can be either identical or completely disjoint). Then
+        calculate the intersection matrix `M` of the two binned data, where
+        `M[i,j]` is the overlap of bin `i` in the first binned data and bin `j`
+        in the second binned data (i.e., the number of spike trains spiking at
+        both bin `i` and bin `j`).
+
+        The matrix entries can be normalized to values between `0` and `1` via
+        different normalizations (see "Parameters" section).
+
+        Parameters
+        ----------
+        normalization : {'intersection', 'mean', 'union'} or None, optional
+            The normalization type to be applied to each entry `M[i,j]` of the
+            intersection matrix `M`. Given the sets `s_i` and `s_j` of neuron
+            IDs in the bins `i` and `j` respectively, the normalization
+            coefficient can be:
+
+                * None: no normalisation (row counts)
+                * 'intersection': `len(intersection(s_i, s_j))`
+                * 'mean': `sqrt(len(s_1) * len(s_2))`
+                * 'union': `len(union(s_i, s_j))`
+            Default: None.
+
+        Returns
+        -------
+        imat : (n,n) np.ndarray
+            The floating point intersection matrix of a list of spike trains.
+            It has the shape `(n, n)`, where `n` is the number of bins that
+            time was discretized in.
+
+        """
+        imat = _intersection_matrix_ht(self.spiketrains_i, self.spiketrains_j,
                                     self.bin_size,
                                     self.t_start_i, self.t_start_j,
                                     self.t_stop_i, self.t_stop_j,
@@ -1951,7 +2057,7 @@ class ASSET(object):
         """
         if imat is None:
             # Compute the intersection matrix of the original data
-            imat = self.intersection_matrix()
+            imat = self.intersection_matrix_ht()
 
         symmetric = self.is_symmetric()
 
@@ -2036,14 +2142,12 @@ class ASSET(object):
                 "compute the probability matrix by Le Cam's approximation...")
 
         # reduction operation along split axis: Mu will be local (Mu.split=None)
-        Mu = ht.sum(spike_prob_mats, axis=0)
+        Mu = ht.sum(spike_prob_mats, axis=0).resplit_(axis=1)
 
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
-        # NB imat is correctly still a np.ndarray
-
-        np_pmat = scipy.stats.poisson.cdf(imat - 1, Mu.numpy())
-        pmat = ht.array(np_pmat, dtype=ht.float32, split=0)
+        np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
+        pmat = ht.array(np_pmat, dtype=ht.float32, is_split=1)
 
         if symmetric:
             # Substitute 0.5 to the elements along the main diagonal
