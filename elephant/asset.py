@@ -638,7 +638,6 @@ def _jsf_uniform_orderstat_3d(u, n, verbose=False):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         log_du = np.log(du)
-        print("ASSET: log_du.dtype = ", log_du.dtype)
 
     # prepare arrays for usage inside the loop
     di_scratch = np.empty_like(du, dtype=np.int32)
@@ -962,18 +961,17 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     filt = ht.triu(filt, -w)
     filt = ht.tril(filt, w)
     # heat: extract torch tensor for faster loop
-    t_filt = filt._DNDarray__array
+    t_filt = filt.larray
 
     # Convert mat values to floats, and replaces np.infs with specified input
     # values
     mat = mat.astype(ht.float32) # TODO: not sure this is necessary, check
 
-    # Initialize the TORCH TENSOR of d-largest values as a matrix of zeroes
-    # 
-    t_lmat = torch.zeros((n_largest, mat.lshape[0], mat.shape[1]), dtype=torch.float32)
+    # Initialize DNDarray of d-largest values to zero
+    # Note: mat is distributed along the columns (split=1), and so is lmat (split=2)
+    lmat = ht.zeros((n_largest,) + mat.shape, dtype=ht.float32, split=2) 
 
-    N_bin_y = mat.lshape[0]
-    N_bin_x = mat.shape[1]
+    N_bin_y, N_bin_x = mat.lshape
     # if the matrix is symmetric do not use kernel positions intersected
     # by the diagonal
     if symmetric:
@@ -983,30 +981,30 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values:
-    # heat version: get right-hand halo if necessary
+    # heat: get right-hand halo if necessary
     if mat.is_distributed():
         offset, _, _ = mat.comm.chunk(mat.gshape, mat.split)
         mat.get_halo(l)
-        t_mat = torch.cat((mat._DNDarray__array, mat.halo_next)) if mat.halo_next is not None else mat._DNDarray__array
+        t_mat = torch.cat((mat.larray, mat.halo_next), dim=1) if mat.halo_next is not None else mat.larray
     else:
         offset = 0
-        t_mat = mat._DNDarray__array
+        t_mat = mat.larray
 
-    #run loop on distributed mat
+    # compute matrix of largest values
+    # 
     for y in bin_range_y:
-        if symmetric:
-            # x range depends on y position
-            bin_range_x = range(y+offset - l + 1)
-        for x in bin_range_x:
-            t_patch = t_mat[y:y + l, x:x + l]  
-            t_mskd = t_filt * t_patch 
-            #largest_vals = ht.sort(mskd.flatten(), axis=None)[0][-n_largest:]
-            t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
-            t_lmat[:, y + (l // 2), x + (l // 2)] = t_largest_vals
-            
-    # assemble local tensor t_lmat into distributed DNDarray lmat
-    # NB: lmat is distributed along mat rows, now dimension 1!
-    lmat = ht.array(t_lmat, is_split=1)
+        if y-l+1 > offset:
+            if symmetric:
+                # x range depends on y position
+                bin_range_x = range(min((y - offset - l + 1), (N_bin_x - l)))
+            for x in bin_range_x:
+                # work on local torch tensors
+                t_patch = t_mat[y:y + l, x:x + l]  
+                t_mskd = t_filt * t_patch 
+                t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
+                # write to DNDarray locally
+                lmat.larray[:, y + (l // 2), x + (l // 2)] = t_largest_vals
+
     return lmat
 
 
@@ -2146,6 +2144,7 @@ class ASSET(object):
 
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
+        # just like imat, pmat is distributed along the columns (split=1)
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
         pmat = ht.array(np_pmat, dtype=ht.float32, is_split=1)
 
