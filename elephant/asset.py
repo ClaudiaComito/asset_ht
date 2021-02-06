@@ -1456,6 +1456,11 @@ def _intersection_matrix(spiketrains, spiketrains_y, bin_size, t_start_x,
     # x and y axes, respectively.
     return imat
 
+def _convert_to_64bit_indices(A):
+    A.indptr = np.array(A.indptr, copy=False, dtype=np.int64)
+    A.indices = np.array(A.indices, copy=False, dtype=np.int64)
+    return A
+
 def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
                          t_start_y, t_stop_x, t_stop_y, normalization=None):
     if spiketrains_y is None:
@@ -1477,8 +1482,12 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # 'A1' property returns self as a flattened ndarray.
     spikes_per_bin_x = bsts_x.sum(axis=0).A1
     spikes_per_bin_y = bsts_y.sum(axis=0).A1
-    # Compute the intersection matrix imat (Compressed Sparse Column format)  
+    # Compute the intersection matrix imat (Compressed Sparse Column format)
+    bsts_x = _convert_to_64bit_indices(bsts_x)
+    bsts_y = _convert_to_64bit_indices(bsts_y)
+    print("ASSET_HT: computing intersection matrix (csc)")  
     csc_imat = bsts_x.T.dot(bsts_y)
+    print("ASSET_HT: distributing intersection matrix (csc)")  
     # Return evenly distributed dense imat as DNDarray (split along columns)
     _, _, lslice = ht.communication.MPI_WORLD.chunk(csc_imat.shape, split=1)
     imat = ht.array(csc_imat[:, lslice[1]].toarray().astype(np.float32), is_split=1)
