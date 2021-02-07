@@ -968,8 +968,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     mat = mat.astype(ht.float32) # TODO: not sure this is necessary, check
 
     # Initialize DNDarray of d-largest values to zero
-    # Note: mat is distributed along the columns (split=1), and so is lmat (split=2)
-    lmat = ht.zeros((n_largest,) + mat.shape, dtype=ht.float32, split=2) 
+    # Note: mat is distributed along the rows (split=0), and so is lmat (split=1)
+    lmat = ht.zeros((n_largest,) + mat.shape, dtype=ht.float32, split=1) 
 
     N_bin_y, N_bin_x = mat.lshape
     # if the matrix is symmetric do not use kernel positions intersected
@@ -985,25 +985,24 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     if mat.is_distributed():
         offset, _, _ = mat.comm.chunk(mat.gshape, mat.split)
         mat.get_halo(l)
-        t_mat = torch.cat((mat.larray, mat.halo_next), dim=1) if mat.halo_next is not None else mat.larray
+        t_mat = torch.cat((mat.larray, mat.halo_next), dim=0) if mat.halo_next is not None else mat.larray
     else:
         offset = 0
         t_mat = mat.larray
 
     # compute matrix of largest values
-    # 
+
     for y in bin_range_y:
-        if y-l+1 > offset:
-            if symmetric:
-                # x range depends on y position
-                bin_range_x = range(min((y - offset - l + 1), (N_bin_x - l)))
-            for x in bin_range_x:
-                # work on local torch tensors
-                t_patch = t_mat[y:y + l, x:x + l]  
-                t_mskd = t_filt * t_patch 
-                t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
-                # write to DNDarray locally
-                lmat.larray[:, y + (l // 2), x + (l // 2)] = t_largest_vals
+        if symmetric:
+            # x range depends on y position
+            bin_range_x = range(y -offset - l + 1)
+        for x in bin_range_x:
+            # work on local torch tensors
+            t_patch = t_mat[y:y + l, x:x + l]  
+            t_mskd = t_filt * t_patch 
+            t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
+            # write to DNDarray locally
+            lmat.larray[:, y + (l // 2), x + (l // 2)] = t_largest_vals
 
     return lmat
 
@@ -1477,52 +1476,78 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # Compute imat by matrix multiplication
     bsts_x = spiketrains_binned.sparse_matrix
     bsts_y = spiketrains_binned_y.sparse_matrix
+    # convert indices to int64 (cf. https://github.com/scipy/scipy/issues/12495)
+    bsts_x = _convert_to_64bit_indices(bsts_x)
+    bsts_y = _convert_to_64bit_indices(bsts_y)
 
     # Compute the number of spikes in each bin, for both time axes
     # 'A1' property returns self as a flattened ndarray.
     spikes_per_bin_x = bsts_x.sum(axis=0).A1
     spikes_per_bin_y = bsts_y.sum(axis=0).A1
-    # Compute the intersection matrix imat (Compressed Sparse Column format)
-    bsts_x = _convert_to_64bit_indices(bsts_x)
-    bsts_y = _convert_to_64bit_indices(bsts_y)
-    print("ASSET_HT: computing intersection matrix (csc)")  
-    csc_imat = bsts_x.T.dot(bsts_y)
-    print("ASSET_HT: distributing intersection matrix (csc)")  
-    # Return evenly distributed dense imat as DNDarray (split along columns)
-    _, _, lslice = ht.communication.MPI_WORLD.chunk(csc_imat.shape, split=1)
-    imat = ht.array(csc_imat[:, lslice[1]].toarray().astype(np.float32), is_split=1)
+
+
+    # Distributed computation of the intersection matrix imat
+    print("ASSET_HT: computing intersection matrix (csc)")
+    
+    # convert csr to csc
+    bsts_x_transposed = bsts_x.tocsc().T
+    bsts_y = bsts_y.tocsc()
+    # allocate local slice of global imat (torch tensor)
+    imat_gshape = 2 * (bsts_x_transposed.shape[0],)
+    offset, imat_lshape, imat_lslice = ht.communication.MPI_WORLD.chunk(imat_gshape, split=0)
+    t_imat = torch.zeros(imat_lshape, dtype=torch.float32)
+    # calculate slicing coordinates 
+    row_slice = imat_lslice[0]
+    local_row_slice = slice(row_slice.start-offset, row_slice.stop-offset)
+    # loop through number of ranks and fill in local dot product slice
+    for r in range(size):
+        if r == rank:
+            column_slice = row_slice
+        else:
+            _, _, lslice = ht.communication.MPI_WORLD.chunk(imat_gshape, split=0, rank=r)
+            column_slice = lslice[0]
+        t_imat[local_row_slice, column_slice] = torch.tensor(
+            bsts_x_transposed[row_slice, :].dot(bsts_y[:, column_slice]).toarray().astype(np.float32))
+
+    imat = ht.array(t_imat, is_split=0)
+    # csc_imat = bsts_x.T.dot(bsts_y)
+    # print("ASSET_HT: distributing intersection matrix (csc)")  
+    # # Return evenly distributed dense imat as DNDarray (split along columns)
+    # _, _, lslice = ht.communication.MPI_WORLD.chunk(csc_imat.shape, split=1)
+    # imat = ht.array(csc_imat[:, lslice[1]].toarray().astype(np.float32), is_split=1)
 
     for ii in range(bsts_x.shape[1]):
-        # Normalize the row
-        col_sum = bsts_x[:, ii].sum()
-        if normalization is None or col_sum == 0:
-            norm_coef = 1.
-        elif normalization == 'intersection':
-            norm_coef = np.minimum(
-                spikes_per_bin_x[ii], spikes_per_bin_y)
-        elif normalization == 'mean':
-            # geometric mean
-            norm_coef = np.sqrt(
-                spikes_per_bin_x[ii] * spikes_per_bin_y)
-        elif normalization == 'union':
-            norm_coef = np.array([(bsts_x[:, ii]
-                                   + bsts_y[:, jj]).count_nonzero()
-                                  for jj in range(bsts_y.shape[1])])
-        else:
-            raise ValueError(
-                "Invalid parameter 'norm': {}".format(normalization))
+        if ii-offset in range(imat.lshape[0]):
+            # Normalize the row
+            col_sum = bsts_x[:, ii].sum()
+            if normalization is None or col_sum == 0:
+                norm_coef = 1.
+            elif normalization == 'intersection':
+                norm_coef = np.minimum(
+                    spikes_per_bin_x[ii], spikes_per_bin_y)
+            elif normalization == 'mean':
+                # geometric mean
+                norm_coef = np.sqrt(
+                    spikes_per_bin_x[ii] * spikes_per_bin_y)
+            elif normalization == 'union':
+                norm_coef = np.array([(bsts_x[:, ii]
+                                    + bsts_y[:, jj]).count_nonzero()
+                                    for jj in range(bsts_y.shape[1])])
+            else:
+                raise ValueError(
+                    "Invalid parameter 'norm': {}".format(normalization))
 
-        # If normalization required, for each j such that bsts_y[j] is
-        # identically 0 the code above sets imat[:, j] to identically nan.
-        # Substitute 0s instead.
-        # imat[ii, :] = np.divide(imat[ii, :], norm_coef,
-        #                         out=np.zeros(imat.shape[1],
-        #                                      dtype=np.float32),
-        #                         where=norm_coef != 0)
-        #TODO implement ht.divide
-        # heat/torch workaround
-        if norm_coef != 0:
-            imat.larray[ii, :] = torch.true_divide(imat.larray[ii, :], torch.tensor(norm_coef))
+            # If normalization required, for each j such that bsts_y[j] is
+            # identically 0 the code above sets imat[:, j] to identically nan.
+            # Substitute 0s instead.
+            # imat[ii, :] = np.divide(imat[ii, :], norm_coef,
+            #                         out=np.zeros(imat.shape[1],
+            #                                      dtype=np.float32),
+            #                         where=norm_coef != 0)
+            #TODO implement ht.divide
+            # heat/torch workaround
+            if norm_coef != 0:
+                imat.larray[ii-offset, :] = torch.true_divide(imat.larray[ii-offset, :], torch.tensor(norm_coef))
 
     # Return the intersection matrix and the edges of the bins used for the
     # x and y axes, respectively.
@@ -2149,13 +2174,14 @@ class ASSET(object):
                 "compute the probability matrix by Le Cam's approximation...")
 
         # reduction operation along split axis: Mu will be local (Mu.split=None)
-        Mu = ht.sum(spike_prob_mats, axis=0).resplit_(axis=1)
+        # distribute Mu along rows to match imat distribution
+        Mu = ht.sum(spike_prob_mats, axis=0).resplit_(axis=0)
 
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
-        # just like imat, pmat is distributed along the columns (split=1)
+        # just like imat, pmat is distributed along the rows (split=0)
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
-        pmat = ht.array(np_pmat, dtype=ht.float32, is_split=1)
+        pmat = ht.array(np_pmat, dtype=ht.float32, is_split=0)
 
         if symmetric:
             # Substitute 0.5 to the elements along the main diagonal
