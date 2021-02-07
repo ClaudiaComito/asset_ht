@@ -1507,6 +1507,7 @@ def _intersection_matrix(spiketrains, spiketrains_y, bin_size, t_start_x,
 def _convert_to_64bit_indices(A):
     A.indptr = np.array(A.indptr, copy=False, dtype=np.int64)
     A.indices = np.array(A.indices, copy=False, dtype=np.int64)
+    A.data = np.array(A.data, copy=False, dtype=np.int64)
     return A
 
 def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
@@ -1528,6 +1529,7 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # convert indices to int64 (cf. https://github.com/scipy/scipy/issues/12495)
     bsts_x = _convert_to_64bit_indices(bsts_x)
     bsts_y = _convert_to_64bit_indices(bsts_y)
+    print("ASSET_HT: bsts_x.dtype = ", bsts_x.data.dtype, bsts_x.indices.dtype)
 
     # Compute the number of spikes in each bin, for both time axes
     # 'A1' property returns self as a flattened ndarray.
