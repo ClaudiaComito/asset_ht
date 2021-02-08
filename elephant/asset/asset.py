@@ -1536,8 +1536,7 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
 
 
     # Distributed computation of the intersection matrix imat
-    print("ASSET_HT: computing intersection matrix (csc)")
-    
+    print("ASSET_HT: computing intersection matrix")    
     # convert csr to csc
     bsts_x_transposed = bsts_x.tocsc().T
     bsts_y = bsts_y.tocsc()
@@ -1548,7 +1547,7 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # calculate slicing coordinates 
     row_slice = imat_lslice[0]
     local_row_slice = slice(row_slice.start-offset, row_slice.stop-offset)
-    # loop through number of ranks and fill in local dot product slice
+    # loop through ranks and fill in local dot-product slice
     for r in range(size):
         if r == rank:
             column_slice = row_slice
