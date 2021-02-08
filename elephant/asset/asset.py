@@ -826,7 +826,7 @@ def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
     # initialise probabilities to 0
     t_P_total = torch.zeros(t_du.shape[0], dtype=torch.float32)
 
-    # distribute matrix entries across processes: TODO abstract into ht.fromiter() 
+    # distribute matrix entries across processes: TODO abstract into ht.fromiter()
     tot_combs = sum(1 for _ in _combinations_with_replacement(n, d = d))
     offset, combs_lshape, combs_slice = u.comm.chunk((tot_combs,), 0)
     combs_lshape = combs_lshape + (d,)
@@ -1507,7 +1507,6 @@ def _intersection_matrix(spiketrains, spiketrains_y, bin_size, t_start_x,
 def _convert_to_64bit_indices(A):
     A.indptr = np.array(A.indptr, copy=False, dtype=np.int64)
     A.indices = np.array(A.indices, copy=False, dtype=np.int64)
-    A.data = np.array(A.data, copy=False, dtype=np.int64)
     return A
 
 def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
@@ -1529,7 +1528,6 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # convert indices to int64 (cf. https://github.com/scipy/scipy/issues/12495)
     bsts_x = _convert_to_64bit_indices(bsts_x)
     bsts_y = _convert_to_64bit_indices(bsts_y)
-    print("ASSET_HT: bsts_x.dtype = ", bsts_x.data.dtype, bsts_x.indices.dtype)
 
     # Compute the number of spikes in each bin, for both time axes
     # 'A1' property returns self as a flattened ndarray.
@@ -1561,11 +1559,6 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
             bsts_x_transposed[row_slice, :].dot(bsts_y[:, column_slice]).toarray().astype(np.float32))
 
     imat = ht.array(t_imat, is_split=0)
-    # csc_imat = bsts_x.T.dot(bsts_y)
-    # print("ASSET_HT: distributing intersection matrix (csc)")  
-    # # Return evenly distributed dense imat as DNDarray (split along columns)
-    # _, _, lslice = ht.communication.MPI_WORLD.chunk(csc_imat.shape, split=1)
-    # imat = ht.array(csc_imat[:, lslice[1]].toarray().astype(np.float32), is_split=1)
 
     for ii in range(bsts_x.shape[1]):
         if ii-offset in range(imat.lshape[0]):
@@ -2403,6 +2396,7 @@ class ASSET(object):
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
+        
         jpvmat = _jsf_uniform_orderstat_3d_ht(pmat_neighb, n,
                                            verbose=self.verbose)
 
