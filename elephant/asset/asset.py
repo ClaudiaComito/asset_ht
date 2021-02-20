@@ -717,6 +717,91 @@ class _JSFUniformOrderStat3D(object):
         P_total = np.clip(P_total, a_min=0., a_max=1.)
 
         return P_total
+    
+    def heat(self, log_du):
+        log_1 = ht.array(np.log(1.))
+        # Compute the log of the integral's coefficient
+        logK=ht.array(np.sum(np.log(np.arange(1, self.n + 1))), dtype = ht.float64)
+
+        # Add to the 3D matrix u a bottom layer equal to 0 and a
+        # top layer equal to 1. Then compute the difference du along
+        # the first dimension.
+
+        # prepare arrays for usage inside the loop
+        di_scratch = ht.empty_like(log_du, dtype=ht.int32)
+        log_du_scratch = ht.empty_like(log_du)
+        print("ASSET_HT: di_scratch.shape, di_scratch.lshape, di_scratch.split =  ", di_scratch.shape, di_scratch.lshape, di_scratch.split)
+        # precompute log(factorial)s
+        # pad with a zero to get 0! = 1
+        log_factorial = ht.array(np.hstack((0, np.cumsum(np.log(range(1, self.n + 1))))))
+
+        # compute the probabilities for each unique row of du
+        # only loop over the indices and do all du entries at once
+        # using matrix algebra
+        # initialise probabilities to 0
+        P_total = ht.array(torch.zeros(
+            log_du.larray.shape[0],
+            dtype=torch.float32 if self.precision == 'float' else torch.float64), is_split=0
+        )
+
+        for iter_id, matrix_entries in enumerate(
+                tqdm(self._combinations_with_replacement(),
+                     total=self.num_iterations,
+                     desc="Joint survival function",
+                     disable=not self.verbose)):
+            # if we are running with MPI
+            if mpi_accelerated and iter_id % size != rank:
+                continue
+            print("ASSET_HT: matrix_entries = ", matrix_entries)
+            # we only need the differences of the indices:
+            di = -ht.diff((self.n,) + matrix_entries + (0,))
+            print("ASSET_HT: di = ", di)
+
+            # HEAT VERSION:
+            # if di in range(offset, offset+lshape[0] ?? )
+            # TODO: how big does log_factorial get? local or distributed?
+
+            # reshape the matrix to be compatible with du
+            di_scratch[:, range(len(di))] = di
+
+            # use precomputed factorials
+            sum_log_di_factorial = log_factorial[di].sum()
+
+            # Compute for each i,j the contribution to the probability
+            # given by this step, and add it to the total probability
+
+            # Use precomputed log # log_du is distributed
+            np.copyto(log_du_scratch, log_du)
+
+            # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du with 1
+            # whenever di_scratch = 0, so that du ** di_scratch = 1 (this
+            # avoids nans when both du and di_scratch are 0, and is
+            # mathematically correct)
+            log_du_scratch[di_scratch == 0] = log_1
+
+            di_log_du = di_scratch * log_du_scratch
+            sum_di_log_du = di_log_du.sum(axis=1)
+            logP = sum_di_log_du - sum_log_di_factorial
+
+            P_total += ht.exp(logP + logK)
+
+        if mpi_accelerated:
+            totals = np.zeros_like(P_total)
+
+            # exchange all the results
+            mpi_float_type = MPI.FLOAT \
+                if self.precision == 'float' else MPI.DOUBLE
+            comm.Allreduce(
+                [P_total, mpi_float_type],
+                [totals, mpi_float_type],
+                op=MPI.SUM)
+
+            # We need to return the collected totals instead of the local
+            # P_total
+            P_total = totals
+
+        return P_total
+
 
     def _choose_backend(self):
         if int(os.getenv("ELEPHANT_USE_CUDA", '1')) == 0:
@@ -749,121 +834,141 @@ class _JSFUniformOrderStat3D(object):
 
         return P_total
 
+    def compute_ht(self, u):
+        if u.shape[1] != self.d:
+            raise ValueError("Invalid input data shape axis 1: expected {}, "
+                             "got {}".format(self.d, u.shape[1]))
+        
+        # warning: u is not evenly distributed among ranks
+        du = ht.diff(u, prepend=0, append=1, axis=1)
 
-def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
-    r"""
-    Considered n independent random variables X1, X2, ..., Xn all having
-    uniform distribution in the interval (0, 1):
+        # precompute logarithms
+        # ignore warnings about infinities, see inside the loop:
+        # we replace 0 * ln(0) by 1 to get exp(0 * ln(0)) = 0 ** 0 = 1
+        # the remaining infinities correctly evaluate to
+        # exp(ln(0)) = exp(-inf) = 0
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            log_du = ht.log(du)
 
-    .. centered::  Xi ~ Uniform(0, 1),
+        P_total = self.heat(log_du)
 
-    given a 2D matrix U = (u_ij) where each U_i is an array of length d:
-    U_i = [u0, u1, ..., u_{d-1}] of quantiles, with u1 <= u2 <= ... <= un,
-    computes the joint survival function (jsf) of the d highest order
-    statistics (U_{n-d+1}, U_{n-d+2}, ..., U_n),
-    where U_k := "k-th highest X's" at each u_i, i.e.:
+        return P_total
 
-    .. centered::  jsf(u_i) = Prob(U_{n-k} >= u_ijk, k=0,1,..., d-1).
+# def _jsf_uniform_orderstat_3d_ht(u, n, verbose=False):
+#     r"""
+#     Considered n independent random variables X1, X2, ..., Xn all having
+#     uniform distribution in the interval (0, 1):
 
-    Parameters
-    ----------
-    u : (A,d) ht.dndarray, process-local (u.split = None)
-        2D matrix of floats between 0 and 1.
-        Each row `u_i` is an array of length `d`, considered a set of
-        `d` largest order statistics extracted from a sample of `n` random
-        variables whose cdf is `F(x) = x` for each `x`.
-        The routine computes the joint cumulative probability of the `d`
-        values in `u_ij`, for each `i` and `j`.
-    n : int
-        Size of the sample where the `d` largest order statistics `u_ij` are
-        assumed to have been sampled from.
-    verbose : bool
-        If True, print messages during the computation.
-        Default: False.
+#     .. centered::  Xi ~ Uniform(0, 1),
 
-    Returns
-    -------
-    P_total : (A,) ht.dndarray
-        Matrix of joint survival probabilities. `s_ij` is the joint survival
-        probability of the values `{u_ijk, k=0, ..., d-1}`.
-        Note: the joint probability matrix computed for the ASSET analysis
-        is `1 - S`.
-    """
-    num_p_vals, d = u.shape 
+#     given a 2D matrix U = (u_ij) where each U_i is an array of length d:
+#     U_i = [u0, u1, ..., u_{d-1}] of quantiles, with u1 <= u2 <= ... <= un,
+#     computes the joint survival function (jsf) of the d highest order
+#     statistics (U_{n-d+1}, U_{n-d+2}, ..., U_n),
+#     where U_k := "k-th highest X's" at each u_i, i.e.:
 
-    # Define ranges [1,...,n], [2,...,n], ..., [d,...,n] for the mute variables
-    # used to compute the integral as a sum over all possibilities
+#     .. centered::  jsf(u_i) = Prob(U_{n-k} >= u_ijk, k=0,1,..., d-1).
+
+#     Parameters
+#     ----------
+#     u : (A,d) ht.dndarray, process-local (u.split = None)
+#         2D matrix of floats between 0 and 1.
+#         Each row `u_i` is an array of length `d`, considered a set of
+#         `d` largest order statistics extracted from a sample of `n` random
+#         variables whose cdf is `F(x) = x` for each `x`.
+#         The routine computes the joint cumulative probability of the `d`
+#         values in `u_ij`, for each `i` and `j`.
+#     n : int
+#         Size of the sample where the `d` largest order statistics `u_ij` are
+#         assumed to have been sampled from.
+#     verbose : bool
+#         If True, print messages during the computation.
+#         Default: False.
+
+#     Returns
+#     -------
+#     P_total : (A,) ht.dndarray
+#         Matrix of joint survival probabilities. `s_ij` is the joint survival
+#         probability of the values `{u_ijk, k=0, ..., d-1}`.
+#         Note: the joint probability matrix computed for the ASSET analysis
+#         is `1 - S`.
+#     """
+#     num_p_vals, d = u.shape 
+
+#     # Define ranges [1,...,n], [2,...,n], ..., [d,...,n] for the mute variables
+#     # used to compute the integral as a sum over all possibilities
                     
-    # torch tensors for local operations:
-    t_log_1 = torch.log(torch.tensor([1], dtype=torch.float64))
-    # Compute the log of the integral's coefficient
-    t_logK = torch.sum(torch.log(torch.arange(1, n + 1).type(torch.float64)))
+#     # torch tensors for local operations:
+#     t_log_1 = torch.log(torch.tensor([1], dtype=torch.float64))
+#     # Compute the log of the integral's coefficient
+#     t_logK = torch.sum(torch.log(torch.arange(1, n + 1).type(torch.float64)))
 
-    # Add to the 3D matrix u a bottom layer equal to 0 and a
-    # top layer equal to 1. Then compute the difference du along
-    # the first dimension.
-    t_du = ht.diff(u, prepend = 0, append = 1, axis = 1)._DNDarray__array
+#     # Add to the 3D matrix u a bottom layer equal to 0 and a
+#     # top layer equal to 1. Then compute the difference du along
+#     # the first dimension.
+#     t_du = ht.diff(u, prepend = 0, append = 1, axis = 1)._DNDarray__array
 
-    # precompute logarithms
-    # ignore warnings about infinities, see inside the loop:
-    # we replace 0 * ln(0) by 1 to get exp(0 * ln(0)) = 0 ** 0 = 1
-    # the remaining infinities correctly evaluate to
-    # exp(ln(0)) = exp(-inf) = 0
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', RuntimeWarning)
-        t_log_du = torch.log(t_du)
+#     # precompute logarithms
+#     # ignore warnings about infinities, see inside the loop:
+#     # we replace 0 * ln(0) by 1 to get exp(0 * ln(0)) = 0 ** 0 = 1
+#     # the remaining infinities correctly evaluate to
+#     # exp(ln(0)) = exp(-inf) = 0
+#     with warnings.catch_warnings():
+#         warnings.simplefilter('ignore', RuntimeWarning)
+#         t_log_du = torch.log(t_du)
 
-    # prepare arrays for usage inside the loop
-    t_log_du_scratch = torch.empty_like(t_log_du)
+#     # prepare arrays for usage inside the loop
+#     t_log_du_scratch = torch.empty_like(t_log_du)
 
-    # precompute log(factorial)s
-    # pad with a zero to get 0! = 1
-    t_log_factorial = torch.cat((torch.tensor([0], dtype=torch.float64), torch.cumsum(torch.log(torch.arange(1, n + 1).type(torch.float64)),0)))
+#     # precompute log(factorial)s
+#     # pad with a zero to get 0! = 1
+#     t_log_factorial = torch.cat((torch.tensor([0], dtype=torch.float64), torch.cumsum(torch.log(torch.arange(1, n + 1).type(torch.float64)),0)))
     
-    # compute the probabilities for each unique row of du
-    # only loop over the indices and do all du entries at once
-    # using matrix algebra
-    # initialise probabilities to 0
-    t_P_total = torch.zeros(t_du.shape[0], dtype=torch.float32)
+#     # compute the probabilities for each unique row of du
+#     # only loop over the indices and do all du entries at once
+#     # using matrix algebra
+#     # initialise probabilities to 0
+#     t_P_total = torch.zeros(t_du.shape[0], dtype=torch.float32)
 
-    # distribute matrix entries across processes: TODO abstract into ht.fromiter()
-    tot_combs = sum(1 for _ in _combinations_with_replacement(n, d = d))
-    offset, combs_lshape, combs_slice = u.comm.chunk((tot_combs,), 0)
-    combs_lshape = combs_lshape + (d,)
-    t_lcombs = torch.empty(combs_lshape, dtype=torch.int64)
-    for i, c in enumerate(_combinations_with_replacement(n, d = d)):
-        if i in range(combs_slice[0].start, combs_slice[0].stop):
-            t_lcombs[i-offset] = torch.tensor(c, dtype=torch.int64).reshape(1, d)
+#     # distribute matrix entries across processes: TODO abstract into ht.fromiter()
+#     tot_combs = sum(1 for _ in _combinations_with_replacement(n, d = d))
+#     offset, combs_lshape, combs_slice = u.comm.chunk((tot_combs,), 0)
+#     combs_lshape = combs_lshape + (d,)
+#     t_lcombs = torch.empty(combs_lshape, dtype=torch.int64)
+#     for i, c in enumerate(_combinations_with_replacement(n, d = d)):
+#         if i in range(combs_slice[0].start, combs_slice[0].stop):
+#             t_lcombs[i-offset] = torch.tensor(c, dtype=torch.int64).reshape(1, d)
 
-    matrix_entries = ht.array(t_lcombs, is_split=0)
-    # we only need the differences of the indices;
-    diffs = (-1 * ht.diff(matrix_entries, prepend=n, append=0))._DNDarray__array.tolist()
-    # loop over differences on rank
-    for di in tqdm(diffs, desc="Joint survival function / heat", disable=not verbose):
-        # use precomputed factorials
-        t_sum_log_di_factorial = t_log_factorial[di].sum()
+#     matrix_entries = ht.array(t_lcombs, is_split=0)
+#     # we only need the differences of the indices;
+#     diffs = (-1 * ht.diff(matrix_entries, prepend=n, append=0))._DNDarray__array.tolist()
+#     # loop over differences on rank
+#     for di in tqdm(diffs, desc="Joint survival function / heat", disable=not verbose):
+#         # use precomputed factorials
+#         t_sum_log_di_factorial = t_log_factorial[di].sum()
 
-        # Compute for each i,j the contribution to the probability
-        # given by this step, and add it to the total probability
-        # use precomputed log
-        t_log_du_scratch = t_log_du.detach().clone()
-        # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du column with 1
-        # whenever di = 0, so that du ** di = 1 (this avoids
-        # nans when both du and di are 0, and is mathematically
-        # correct)
-        di_zero = [i for i in range(len(di)) if di[i] == 0]
-        t_log_du_scratch[:, di_zero] = t_log_1
-        t_di = torch.tensor(di)
-        t_di_log_du = t_di * t_log_du_scratch
-        t_sum_di_log_du=t_di_log_du.sum(1)
-        t_logP=t_sum_di_log_du - t_sum_log_di_factorial
-        t_P_total += torch.exp(t_logP + t_logK)
+#         # Compute for each i,j the contribution to the probability
+#         # given by this step, and add it to the total probability
+#         # use precomputed log
+#         t_log_du_scratch = t_log_du.detach().clone()
+#         # for each a=0,1,...,A-1 and b=0,1,...,B-1, replace du column with 1
+#         # whenever di = 0, so that du ** di = 1 (this avoids
+#         # nans when both du and di are 0, and is mathematically
+#         # correct)
+#         di_zero = [i for i in range(len(di)) if di[i] == 0]
+#         t_log_du_scratch[:, di_zero] = t_log_1
+#         t_di = torch.tensor(di)
+#         t_di_log_du = t_di * t_log_du_scratch
+#         t_sum_di_log_du=t_di_log_du.sum(1)
+#         t_logP=t_sum_di_log_du - t_sum_log_di_factorial
+#         t_P_total += torch.exp(t_logP + t_logK)
 
-    if size == 1:
-        return ht.array(t_P_total, dtype=ht.float32)
-    else:
-        totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=u.comm).sum(axis=0)
-    return totals
+#     if size == 1:
+#         return ht.array(t_P_total, dtype=ht.float32)
+#     else:
+#         totals = ht.array(t_P_total.unsqueeze(0), dtype=ht.float32, is_split=0, comm=u.comm).sum(axis=0)
+#     return totals
 
 def _pmat_neighbors(mat, filter_shape, n_largest):
     """
@@ -1540,10 +1645,10 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # convert csr to csc
     bsts_x_transposed = bsts_x.tocsc().T
     bsts_y = bsts_y.tocsc()
-    # allocate local slice of global imat (torch tensor)
+    # allocate global imat (DNDarray)
     imat_gshape = 2 * (bsts_x_transposed.shape[0],)
+    imat = ht.zeros(imat_gshape, dtype=ht.float32, split=0)
     offset, imat_lshape, imat_lslice = ht.communication.MPI_WORLD.chunk(imat_gshape, split=0)
-    t_imat = torch.zeros(imat_lshape, dtype=torch.float32)
     # calculate slicing coordinates 
     row_slice = imat_lslice[0]
     local_row_slice = slice(row_slice.start-offset, row_slice.stop-offset)
@@ -1554,10 +1659,8 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
         else:
             _, _, lslice = ht.communication.MPI_WORLD.chunk(imat_gshape, split=0, rank=r)
             column_slice = lslice[0]
-        t_imat[local_row_slice, column_slice] = torch.tensor(
+        imat.larray[local_row_slice, column_slice] = torch.tensor(
             bsts_x_transposed[row_slice, :].dot(bsts_y[:, column_slice]).toarray().astype(np.float32))
-
-    imat = ht.array(t_imat, is_split=0)
 
     for ii in range(bsts_x.shape[1]):
         if ii-offset in range(imat.lshape[0]):
@@ -2382,22 +2485,38 @@ class ASSET(object):
 
         # gather pmat_neighb, it will go into _jsf_uniform_orderstat_3d_ht() as 
         # process-local DNDarray
-        pmat_neighb.resplit_(axis=None)
+        #pmat_neighb.resplit_(axis=None)
 
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
         # and store the corresponding indices
         # flatten the second and third dimension in order to use np.unique
+        print("ASSET_HT: pmat_neighb.shape, pmat_neighb.lshape, pmat_neighb.split = ", pmat_neighb.shape, pmat_neighb.lshape, pmat_neighb.split)
         pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size)).T
+        print("ASSET_HT after reshaping: pmat_neighb.shape, pmat_neighb.lshape, pmat_neighb.split = ", pmat_neighb.shape, pmat_neighb.lshape, pmat_neighb.split)
+        # TEST: gather all uniques
+        t_pmat_neighb, t_pmat_neighb_indices = torch.unique(pmat_neighb.larray, axis=0, sorted=True,
+                                                     return_inverse=True)
+        uniques=ht.array(t_pmat_neighb, is_split=0)
+        uniques_map=uniques.create_lshape_map()
+        print("ASSET_HT: uniques_map = ", uniques_map)
+        uniques_map.resplit_(None)
+        print("ASSET_HT: gathered uniques_map")                                        
+        
         pmat_neighb, t_pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, sorted=True,
                                                      return_inverse=True)
+        #print("ASSET_HT: after unique: t_pmat_neighb.shape = ", t_pmat_neighb, t_pmat_neighb.shape)
+        #pmat_neighb=ht.array(t_pmat_neighb, is_split=0)
 
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
         
-        jpvmat = _jsf_uniform_orderstat_3d_ht(pmat_neighb, n,
-                                           verbose=self.verbose)
+        jsf = _JSFUniformOrderStat3D(n=n, d=pmat_neighb.shape[1])
+        jpvmat = jsf.compute_ht(u=pmat_neighb)
+
+        # jpvmat = _jsf_uniform_orderstat_3d_ht(pmat_neighb, n,
+        #                                    verbose=self.verbose)
 
         # restore the original shape using the stored indices
         jpvmat=jpvmat[t_pmat_neighb_indices.tolist()].reshape(pmat.shape)
