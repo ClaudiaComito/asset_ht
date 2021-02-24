@@ -2156,6 +2156,7 @@ class ASSET(object):
         if self.verbose:
             print(
                 "compute the probability matrix by Le Cam's approximation...")
+        
         Mu = spike_probs_x.T.dot(spike_probs_y)
         # A straightforward implementation is:
         # pmat_shape = spike_probs_x.shape[1], spike_probs_y.shape[1]
@@ -2287,39 +2288,31 @@ class ASSET(object):
             print('compute the prob. that each neuron fires in each pair of '
                   'bins...')
 
-        spike_probs_x = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
-            pq.dimensionless).magnitude)) for rate in fir_rate_x]
+        rate_bins_x = (fir_rate_x * self.bin_size).simplified.magnitude
+        spike_probs_x = 1. - np.exp(-rate_bins_x)
         if symmetric:
             spike_probs_y = spike_probs_x
         else:
-            spike_probs_y = [1. - np.exp(-np.array((rate * self.bin_size).rescale(
-                pq.dimensionless).magnitude)) for rate in fir_rate_y]
+            rate_bins_y = (fir_rate_y * self.bin_size).simplified.magnitude
+            spike_probs_y = 1. - np.exp(-rate_bins_y)
 
-        # switch to heat: distribute data evenly among ranks, extract local torch tensors
-        t_spike_probs_x = ht.array(spike_probs_x, split=0)._DNDarray__array
-        t_spike_probs_y = ht.array(spike_probs_x, split=0)._DNDarray__array
-
-        # For each neuron k compute the matrix of probabilities p_ijk that
-        # neuron k spikes in both bins i and j. (For i = j it's just spike
-        # probs[k][i])
-
-        # use torch for local outer product 
-        t_spike_prob_mats = torch.einsum("ki,kj->kij", t_spike_probs_x, t_spike_probs_y)
-        # wrap into distributed ht.dndarray
-        spike_prob_mats = ht.array(t_spike_prob_mats, is_split=0)
+        # switch to heat: 
+        # distribute data along columns in preparation for dot product
+        spike_probs_x = ht.array(spike_probs_x, split=1)
+        spike_probs_y = ht.array(spike_probs_y, split=1)
 
         # Compute the matrix Mu[i, j] of parameters for the Poisson
         # distributions which describe, at each (i, j), the approximated
         # overlap probability. This matrix is just the sum of the probability
-        # matrices computed above
+        # matrices p_ijk computed for each neuron k:
+        # p_ijk is the probability that neuron k spikes in both bins i and j.
+        # The sum of outer products is equivalent to a dot product.
 
         if self.verbose:
             print(
                 "compute the probability matrix by Le Cam's approximation...")
-
-        # reduction operation along split axis: Mu will be local (Mu.split=None)
-        # distribute Mu along rows to match imat distribution
-        Mu = ht.sum(spike_prob_mats, axis=0).resplit_(axis=0)
+        
+        Mu = ht.dot(spike_probs_x.T, spike_probs_y)
 
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
