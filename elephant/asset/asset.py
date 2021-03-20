@@ -123,6 +123,8 @@ import heat as ht
 import torch
 import itertools
 
+import tracemalloc
+
 try:
     from mpi4py import MPI
 
@@ -607,7 +609,6 @@ class _JSFUniformOrderStat3D(object):
         # precompute log(factorial)s
         # pad with a zero to get 0! = 1
         log_factorial=np.hstack((0, np.cumsum(np.log(range(1, self.n + 1)))))
-        print("ASSET: log_factorial.shape = ", log_factorial.shape)
 
         # compute the probabilities for each unique row of du
         # only loop over the indices and do all du entries at once
@@ -749,10 +750,13 @@ class _JSFUniformOrderStat3D(object):
                      total=self.num_iterations,
                      desc="Joint survival function",
                      disable=not self.verbose)):
-            if not log_du.is_distributed():
-                # if we are running with MPI
-                if mpi_accelerated and iter_id % size != rank:
-                    continue
+            # if not log_du.is_distributed():
+            #     # if we are running with MPI
+            if iter_id <= 100:
+                print("Matrix entries = ", matrix_entries)
+
+            if mpi_accelerated and iter_id % size != rank:
+                continue
 
             # we only need the differences of the indices:
             # TODO replace with torch.diff asap
@@ -776,24 +780,22 @@ class _JSFUniformOrderStat3D(object):
             cond = torch.where(t_di_scratch == 0)
             t_log_du_scratch[cond] = t_log_1
 
-            if log_du.is_distributed():
-                # distributed heat operations
-                di_scratch = ht.array(t_di_scratch, is_split=0)
-                log_du_scratch = ht.array(t_log_du_scratch, is_split=0)
-                di_log_du = di_scratch * log_du_scratch
-                sum_di_log_du = di_log_du.sum(axis=1)
-                logP = sum_di_log_du - sum_log_di_factorial
-                P_total[rank] += ht.exp(logP + ht.array(t_logK))
-            else:
-                # local torch ops
-                t_di_log_du = t_di_scratch * t_log_du_scratch
-                t_sum_di_log_du = t_di_log_du.sum(axis=1)
-                t_logP = t_sum_di_log_du - t_sum_log_di_factorial
-                P_total[rank].larray += torch.exp(t_logP + t_logK)
+            # if log_du.is_distributed():
+            #     # distributed heat operations
+            #     di_scratch = ht.array(t_di_scratch, is_split=0)
+            #     log_du_scratch = ht.array(t_log_du_scratch, is_split=0)
+            #     di_log_du = di_scratch * log_du_scratch
+            #     sum_di_log_du = di_log_du.sum(axis=1)
+            #     logP = sum_di_log_du - sum_log_di_factorial
+            #     P_total[rank] += ht.exp(logP + ht.array(t_logK))
+            # else:
+            # local torch ops
+            t_di_log_du = t_di_scratch * t_log_du_scratch
+            t_sum_di_log_du = t_di_log_du.sum(axis=1)
+            t_logP = t_sum_di_log_du - t_sum_log_di_factorial
+            P_total[rank].larray += torch.exp(t_logP + t_logK)
         
         P_total = P_total.sum(axis=0)
-        print("ASSET_HT: P_total.lshape, split = ", P_total.lshape, P_total.gshape, P_total.split)
-
         # if mpi_accelerated:
         #     totals = np.zeros_like(P_total)
 
@@ -848,7 +850,7 @@ class _JSFUniformOrderStat3D(object):
             raise ValueError("Invalid input data shape axis 1: expected {}, "
                              "got {}".format(self.d, u.shape[1]))
         
-        # warning: u is not evenly distributed among ranks
+        # warning: u is most likely process-local 
         du = ht.diff(u, prepend=0, append=1, axis=1)
 
         # precompute logarithms
@@ -1657,6 +1659,7 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
     # allocate global imat (DNDarray)
     imat_gshape = 2 * (bsts_x_transposed.shape[0],)
     imat = ht.zeros(imat_gshape, dtype=ht.float32, split=0)
+    # calculate DNDarray coordinates
     offset, imat_lshape, imat_lslice = ht.communication.MPI_WORLD.chunk(imat_gshape, split=0)
     # calculate slicing coordinates 
     row_slice = imat_lslice[0]
@@ -2322,8 +2325,6 @@ class ASSET(object):
                 "compute the probability matrix by Le Cam's approximation...")
         
         Mu = ht.dot(spike_probs_x.T, spike_probs_y)
-        print("ASSET_HT: Mu.split = ", Mu.split, Mu.shape, Mu.lshape)
-        print("ASSET_HT: imat.split = ", imat.split, imat.shape, imat.lshape)
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
         # just like imat, pmat is distributed along the rows (split=0)
@@ -2420,10 +2421,8 @@ class ASSET(object):
         # and store the corresponding indices
         # flatten the second and third dimension in order to use np.unique
         pmat_neighb=pmat_neighb.reshape(n_largest, pmat.size).T
-        print("ASSET: BEFORE UNIQUE: pmat_neighb.shape = ", pmat_neighb.shape)
         pmat_neighb, pmat_neighb_indices = np.unique(pmat_neighb, axis=0,
                                                      return_inverse = True)
-        print("ASSET: AFTER UNIQUE: pmat_neighb.shape = ", pmat_neighb.shape, pmat_neighb.dtype)
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
@@ -2440,7 +2439,7 @@ class ASSET(object):
         return 1. - jpvmat
 
     def joint_probability_matrix_ht(self, pmat, filter_shape, n_largest,
-                                 min_p_value=1e-5):
+                                 min_p_value=1e-5, precision='double'):
         """
         Map a probability matrix `pmat` to a joint probability matrix `jmat`,
         where `jmat[i, j]` is the joint p-value of the largest neighbors of
@@ -2480,19 +2479,21 @@ class ASSET(object):
             The joint probability matrix associated to `pmat`.
 
         """
+        tracemalloc.start()
+
         l, w = filter_shape
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT BEFORE EVERYTHING: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
-        print("ASSET_HT: before minimum: pmat_neighb.dtype, pmat_neighb.gshape,  pmat_neighb.lshape= ", pmat_neighb.dtype, pmat_neighb.gshape,  pmat_neighb.lshape)
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT BEFORE MINIMUM: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb=ht.minimum(pmat_neighb, ht.array(np.array(1. - min_p_value).astype(np.float32)))
-        print("ASSET_HT: after minimum: pmat_neighb.dtype, pmat_neighb.gshape,  pmat_neighb.lshape = ", pmat_neighb.dtype, pmat_neighb.gshape,  pmat_neighb.lshape)
-
-        # gather pmat_neighb, it will go into _jsf_uniform_orderstat_3d_ht() as 
-        # process-local DNDarray
-        #pmat_neighb.resplit_(axis=None)
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT AFTER MINIMUM: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
@@ -2500,23 +2501,26 @@ class ASSET(object):
         # flatten the second and third dimension in order to use np.unique
         
         pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size)).T
-        print("ASSET_HT: before unique: pmat_neighb.lshape = ", pmat_neighb.lshape)
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT AFTER RESHAPE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
-        print("ASSET_HT: after unique: pmat_neighb_indices.lshape = ", pmat_neighb_indices.lshape)                                            
-        print("ASSET_HT: after unique: pmat_neighb.lshape = ", pmat_neighb.lshape)   
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT AFTER UNIQUE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
         
         jsf = _JSFUniformOrderStat3D(n=n, d=pmat_neighb.shape[1])
-        jpvmat = jsf.compute_ht(u=pmat_neighb)
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT AFTER JSF: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
-        # jpvmat = _jsf_uniform_orderstat_3d_ht(pmat_neighb, n,
-        #                                    verbose=self.verbose)
+        jpvmat = jsf.compute_ht(u=pmat_neighb)
+        current, peak = tracemalloc.get_traced_memory()
+        print(f"ASSET_HT AFTER COMPUTE_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         # restore the original shape using the stored indices
-        jpvmat=ht.array(jpvmat.larray[pmat_neighb_indices.larray.tolist()], is_split=0).reshape(pmat.shape)
+        jpvmat=ht.array(jpvmat.larray[pmat_neighb_indices.larray], is_split=0).reshape(pmat.shape)
         
         return 1. - jpvmat
 
