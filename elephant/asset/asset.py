@@ -468,22 +468,22 @@ def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
     x, y = xy_mat[:, 0], xy_mat[:, 1]
     x_array = ht.tile(x, reps=(x.gshape[0], 1))
     y_array = ht.tile(y, reps=(y.gshape[0], 1))
-    dX = x_array.T - x_array.resplit_(axis=0)  # dX[i,j]: x difference between points i and j
-    dY = y_array.T - y_array.resplit_(axis=0)  # dY[i,j]: y difference between points i and j
+    dX = x_array.T - x_array.resplit_(axis=1)  # dX[i,j]: x difference between points i and j
+    dY = y_array.T - y_array.resplit_(axis=1)  # dY[i,j]: y difference between points i and j
 
     # Compute the matrix Theta of angles between each pair of points
     theta = ht.arctan2(dY, dX)
 
     # Transform [-pi, pi] back to [-pi/2, pi/2]
-    where_smaller = ht.where(theta < -ht.pi / 2)._DNDarray__array.tolist()
-    where_larger = ht.where(theta > ht.pi / 2)._DNDarray__array.tolist()
+    where_smaller = ht.where(theta < -ht.pi / 2)
+    where_larger = ht.where(theta > ht.pi / 2)
     theta[where_smaller] += ht.pi
     theta[where_larger] -= ht.pi
 
     # Compute the matrix of stretching factors for each pair of points
     stretch_mat = 1 + (stretch - 1.) * ht.abs(ht.sin(alpha - theta))
-
     # Return the stretched distance matrix
+    stretch_mat.resplit_(0)
     return D * stretch_mat
 
 
@@ -618,7 +618,6 @@ class _JSFUniformOrderStat3D(object):
             log_du.shape[0],
             dtype=np.float32 if self.precision == 'float' else np.float64
         )
-        #print("ASSET: self.num_iterations = ", self.num_iterations)
         for iter_id, matrix_entries in enumerate(
                 tqdm(self._combinations_with_replacement(),
                      total=self.num_iterations,
@@ -668,7 +667,6 @@ class _JSFUniformOrderStat3D(object):
             # We need to return the collected totals instead of the local
             # P_total
             P_total = totals
-            #print("ASSET: P_total.shape = ", P_total.shape)
 
         return P_total
 
@@ -825,7 +823,6 @@ class _JSFUniformOrderStat3D(object):
             raise ValueError("Invalid input data shape axis 1: expected {}, "
                              "got {}".format(self.d, u.shape[1]))
         
-        # warning: u is most likely process-local 
         du = ht.diff(u, prepend=0, append=1, axis=1)
 
         # precompute logarithms
@@ -1637,7 +1634,6 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
 
 
     # Distributed computation of the intersection matrix imat
-    print("ASSET_HT: computing intersection matrix")    
     # convert csr to csc
     bsts_x_transposed = bsts_x.tocsc().T
     bsts_y = bsts_y.tocsc()
