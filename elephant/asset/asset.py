@@ -528,6 +528,7 @@ def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
     # Compute the matrix of stretching factors for each pair of points
     stretch_mat = 1 + (stretch - 1.) * ht.abs(ht.sin(alpha - theta))
     # Return the stretched distance matrix
+    # TODO: too much redistribution: check actual needs
     stretch_mat.resplit_(0)
     return D * stretch_mat
 
@@ -1061,7 +1062,7 @@ class _JSFUniformOrderStat3D(_GPUBackend):
 
         # we only need the process-local (torch tensors) differences of the entries;
         t_diffs = (-1 * ht.diff(matrix_entries, prepend=self.n, append=0)).larray
-        # loop over differences on rank
+        # loop over differences on rank TODO: check performance/memory usage wrt cpu()
         for t_di in tqdm(t_diffs.split(1), desc="Joint survival function / heat", disable=not self.verbose):
             # use precomputed factorials
 
@@ -2211,7 +2212,7 @@ def _intersection_matrix_ht(spiketrains, spiketrains_y, bin_size, t_start_x,
             #                         out=np.zeros(imat.shape[1],
             #                                      dtype=np.float32),
             #                         where=norm_coef != 0)
-            #TODO implement ht.divide
+            #TODO expand ht.divide functionalities #870
             # heat/torch workaround
             if norm_coef != 0:
                 imat.larray[ii-offset, :] = torch.true_divide(imat.larray[ii-offset, :], torch.tensor(norm_coef))
@@ -3043,6 +3044,8 @@ class ASSET(object):
         jpvmat = jsf.compute_ht(u=pmat_neighb)
 
         # restore the original shape using the stored indices
+        # TODO: possible memory bottleck with distributed jpvmat
+        # distributed getitem!
         jpvmat.resplit_()
         jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
         return 1. - jpvmat
@@ -3153,7 +3156,8 @@ class ASSET(object):
             mask &= mat > thresh
 
         # Replace nans, coming from False * np.inf, with zeros
-        mask_isnan = ht.where(mask == ht.nan)._DNDarray__array
+        # TODO: update to latest heat getitem: larray needed?
+        mask_isnan = ht.where(mask == ht.nan).larray
         mask[mask_isnan] = False
 
         return mask
@@ -3354,6 +3358,7 @@ class ASSET(object):
         if local_pos_sgnf.is_distributed():
             # local_pos_sgnf is unevenly distributed, we need this information later
             # store unbalanced slice information and share among ranks
+            #TODO: update to current heat getitem
             t_local_slice = torch.tensor(local_pos_sgnf.lshape[local_pos_sgnf.split], dtype=torch.int64)
             t_global_slices = torch.zeros(size, dtype=torch.int64)
             local_pos_sgnf.comm.Allgather(t_local_slice, t_global_slices)
@@ -3374,6 +3379,7 @@ class ASSET(object):
         # NB: switching back to numpy for dbscan. TODO: ht.dbscan 
         # Cluster positions of significant pixels via dbscan
         np_D = D.numpy()
+        # TODO: branch off to HPDBSCAN via D.larray.numpy() distributed data
         np_core_samples, np_config = dbscan(
             np_D, eps=max_distance, min_samples=min_neighbors,
             metric='precomputed')
@@ -3459,6 +3465,88 @@ class ASSET(object):
             worm_k = {}
             pos_worm_k = np.array(
                 np.where(cmat == k)).T  # position of all links
+            # if no link lies on the reference diagonal
+            if all([y - x != diag_id for (x, y) in pos_worm_k]):
+                for bin_x, bin_y in pos_worm_k:  # for each link
+
+                    # reconstruct the link
+                    link_l = set(tracts_x[bin_x]).intersection(
+                        tracts_y[bin_y])
+
+                    # and assign it to its pixel
+                    worm_k[(bin_x, bin_y)] = link_l
+
+                sse_dict[k] = worm_k
+
+        return sse_dict
+
+    def extract_synchronous_events_ht(self, cmat, ids=None):
+        """
+        Given a list of spike trains, a bin size, and a clustered
+        intersection matrix obtained from those spike trains via ASSET
+        analysis, extracts the sequences of synchronous events (SSEs)
+        corresponding to clustered elements in the cluster matrix.
+
+        Parameters
+        ----------
+        cmat : (n,n) np.ndarray
+            The cluster matrix, the output of
+            :func:`ASSET.cluster_matrix_entries`.
+        ids : list, optional
+            A list of spike train IDs. If provided, `ids[i]` is the identity
+            of `spiketrains[i]`. If None, the IDs `0,1,...,n-1` are used.
+            Default: None
+
+        Returns
+        -------
+        sse_dict : dict
+            A dictionary `D` of SSEs, where each SSE is a sub-dictionary `Dk`,
+            `k=1,...,K`, where `K` is the max positive integer in `cmat` (i.e.,
+            the total number of clusters in `cmat`):
+
+            .. centered:: D = {1: D1, 2: D2, ..., K: DK}
+
+            Each sub-dictionary `Dk` represents the k-th diagonal structure
+            (i.e., the k-th cluster) in `cmat`, and is of the form
+
+            .. centered:: Dk = {(i1, j1): S1, (i2, j2): S2, ..., (iL, jL): SL}.
+
+            The keys `(i, j)` represent the positions (time bin IDs) of all
+            elements in `cmat` that compose the SSE (i.e., that take value `l`
+            and therefore belong to the same cluster), and the values `Sk` are
+            sets of neuron IDs representing a repeated synchronous event (i.e.,
+            spiking at time bins `i` and `j`).
+        """
+        nr_worms = cmat.max()  # number of different clusters ("worms") in cmat
+        if nr_worms <= 0:
+            return {}
+
+        # Compute the transactions associated to the two binnings
+        tracts_x = _transactions(
+            self.spiketrains_i, bin_size=self.bin_size, t_start=self.t_start_i,
+            t_stop=self.t_stop_i,
+            ids=ids)
+
+        if self.spiketrains_j is self.spiketrains_i:
+            diag_id = 0
+            tracts_y = tracts_x
+        else:
+            if self.is_symmetric():
+                diag_id = 0
+                tracts_y = tracts_x
+            else:
+                diag_id = None
+                tracts_y = _transactions(
+                    self.spiketrains_j, bin_size=self.bin_size,
+                    t_start=self.t_start_j, t_stop=self.t_stop_j, ids=ids)
+
+        # Reconstruct each worm, link by link
+        sse_dict = {}
+        for k in range(1, nr_worms + 1):  # for each worm
+            # worm k is a list of links (each link will be 1 sublist)
+            worm_k = {}
+            pos_worm_k = ht.array(
+                ht.where(cmat == k)).numpy().T  # position of all links
             # if no link lies on the reference diagonal
             if all([y - x != diag_id for (x, y) in pos_worm_k]):
                 for bin_x, bin_y in pos_worm_k:  # for each link
