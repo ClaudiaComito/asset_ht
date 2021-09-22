@@ -1639,6 +1639,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     #lmat = ht.zeros((n_largest,) + mat.shape, dtype=ht.float32, split=1) 
 
     # heat: get right-hand halo if necessary
+    print("DEBUGGING: rank, mat.gshape, mat.lshape, l = ", mat.comm.rank, mat.gshape, mat.lshape, l)
     if mat.is_distributed():
         offset, _, _ = mat.comm.chunk(mat.gshape, mat.split)
         mat.get_halo(l)
@@ -1649,7 +1650,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
 
     # initialize local tensor of d-largest values to zero    
     t_lmat = torch.zeros((n_largest,) + t_mat.shape, dtype=torch.float32, device=t_mat.device)
-
+    print("DEBUGGING: rank, t_mat.shape = ", mat.comm.rank, t_mat.shape)
     N_bin_y, N_bin_x = t_mat.shape
     # if the matrix is symmetric do not use kernel positions intersected
     # by the diagonal
