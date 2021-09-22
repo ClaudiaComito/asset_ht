@@ -1662,12 +1662,15 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     
     # compute matrix of largest values
     for y in bin_range_y:
+        print("DEBUGGING: y = ", y, "of ", bin_range_y)
         if symmetric:
             # x range depends on y position
             bin_range_x = range(y + offset - l + 1)
         for x in bin_range_x:
+            print("DEBUGGING: x = ", x, "of ", bin_range_x)
             # work on local torch tensors
             t_patch = t_mat[y:y + l, x:x + l]  
+            print("DEBUGGING: t_filt.shape, t_patch.shape = ", t_filt.shape, t_patch.shape)
             t_mskd = t_filt * t_patch 
             t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
             t_lmat[:, y + (l // 2), x + (l // 2)] = t_largest_vals
