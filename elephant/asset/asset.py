@@ -1677,9 +1677,10 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
             t_lmat = t_lmat[:, l//2:, :]
         else:
             t_lmat = t_lmat[:, l//2:-l//2, :]
-        mat.comm.Barrier()
+#        mat.comm.Barrier()
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
+    #lmat = ht.array(t_lmat, is_split=1, device=mat.device)
     lmat.balance_()
     return lmat
 
@@ -3046,7 +3047,7 @@ class ASSET(object):
         # restore the original shape using the stored indices
         # TODO: possible memory bottleck with distributed jpvmat
         # distributed getitem!
-        jpvmat.resplit_()
+        jpvmat.resplit_(None)
         jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
         return 1. - jpvmat
 
