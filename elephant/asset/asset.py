@@ -3063,8 +3063,9 @@ class ASSET(object):
         # restore the original shape using the stored indices
         # TODO: possible memory bottleck with distributed jpvmat
         # distributed getitem!
-        jpvmat.resplit_(None)
-        jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
+        # TEST: skip resplit
+        # jpvmat.resplit_(None)
+        # jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
         return 1. - jpvmat
 
     @staticmethod
