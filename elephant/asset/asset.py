@@ -1660,16 +1660,32 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     
     # compute matrix of largest values
     for y in bin_range_y:
+#        print("DEBUGGING: y = ", y)
+        #TODO: vectorize loop along x axis (columns)    
         if symmetric:
             # x range depends on y position
             bin_range_x = range(y + offset - l + 1)
-        #TODO: vectorize loop along x axis (columns)    
-        for x in bin_range_x:
-            # work on local torch tensors
-            t_patch = t_mat[y:y + l, x:x + l]  
-            t_mskd = t_filt * t_patch 
-            t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
-            t_lmat[:, y + (l // 2), x + (l // 2)] = t_largest_vals
+        # for x in bin_range_x:
+        #     # work on local torch tensors
+        #     t_patch = t_mat[y:y + l, x:x + l]  
+        #     t_mskd = t_filt * t_patch 
+        #     t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
+        #     t_lmat[:, y + (l // 2), x + (l // 2)] = t_largest_vals
+        # vectorize (see https://stackoverflow.com/questions/39232790/numpy-vectorization-of-sliding-window-operation)
+        #print("DEBUGGING: bin_range_x = ", bin_range_x)
+        t_strip = t_mat[y:y + l, bin_range_x.start:bin_range_x.stop-1+l]
+        #print("DEBUGGING: t_strip.shape = ", t_strip.shape)
+        # sliding matrix multiplication. Transpose to slide along rows
+        t_strip = t_strip.T
+        t_filt = t_filt.T
+        idx = torch.arange(t_strip.shape[0]-l+1)[:,None] + torch.arange(l)
+        t_mskd_3d = t_filt*t_strip[idx]
+        # transpose back and flatten rows/columns
+        t_mskd_2d = torch.transpose(t_mskd_3d, 1, 2).reshape(t_mskd_3d.shape[0], -1)
+        t_largest_vals_2d = t_mskd_2d.sort(dim=1)[0][:, -n_largest:]
+        #print("debugging: t_largest_vals_2d.shape = ", t_largest_vals_2d.shape)
+        t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
+
     if mat.is_distributed():            
         if rank == 0:
             t_lmat = t_lmat[:, :-l//2, :]
@@ -3365,7 +3381,7 @@ class ASSET(object):
             local_pos_sgnf.comm.Allgather(t_local_slice, t_global_slices)
             global_slices = torch.cat((torch.tensor([0]),  torch.cumsum(t_global_slices, dim=0))).tolist() 
         else:
-            global_slices = list(0, local_pos_sgnf.gshape[local_pos_sgnf.split])
+            global_slices = list((0,)+(local_pos_sgnf.gshape[local_pos_sgnf.split],))
         
         # balance local_pos_sgnf for upcoming distributed operations
         # TODO check that we really need to have a copy here
