@@ -3043,6 +3043,8 @@ class ASSET(object):
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
+        #TEST!!
+        return pmat_neighb.reshape((n_largest, pmat.size)).T
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
 
         # in order to avoid doing the same calculation multiple times:
@@ -3064,8 +3066,8 @@ class ASSET(object):
         # TODO: possible memory bottleck with distributed jpvmat
         # distributed getitem!
         # TEST: skip resplit
-        # jpvmat.resplit_(None)
-        # jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
+        jpvmat.resplit_(None)
+        jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
         return 1. - jpvmat
 
     @staticmethod
