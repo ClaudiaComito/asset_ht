@@ -3062,7 +3062,12 @@ class ASSET(object):
         # and store the corresponding indices
         # flatten the second and third dimension 
         
-        pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size))
+        # TEST: bypass ht.reshape
+        t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
+        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, copy=False)
+        pmat_neighb.balance_()
+                
+        #pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size))
         log.warning("DEBUGGING: after reshape")
         pmat_neighb=pmat_neighb.T
         log.warning("DEBUGGING: after transpose")
