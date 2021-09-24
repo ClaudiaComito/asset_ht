@@ -149,6 +149,7 @@ import tracemalloc
 import logging
 logging.basicConfig(format='%(message)s')
 log = logging.getLogger(__name__)
+import time
 
 try:
     from mpi4py import MPI
@@ -1670,6 +1671,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         if symmetric:
             # x range depends on y position
             bin_range_x = range(y + offset - l + 1)
+        start = time.time()
         # for x in bin_range_x:
         #     # work on local torch tensors
         #     t_patch = t_mat[y:y + l, x:x + l]  
@@ -1690,7 +1692,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         t_largest_vals_2d = t_mskd_2d.sort(dim=1)[0][:, -n_largest:]
         #print("debugging: t_largest_vals_2d.shape = ", t_largest_vals_2d.shape)
         t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
-    log.warning("DEBUGGING: x-y loop done")
+        end = time.time()
+    log.warning("DEBUGGING: x-y loop done in  "+str(end-start)+" seconds with x-range "+str(bin_range_x.start)+" and "+str(bin_range_x.stop))
     if mat.is_distributed():            
         if rank == 0:
             t_lmat = t_lmat[:, :-l//2, :]
@@ -3059,8 +3062,10 @@ class ASSET(object):
         # and store the corresponding indices
         # flatten the second and third dimension 
         
-        pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size)).T
-        log.warning("DEBUGGING: after reshape.T")
+        pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size))
+        log.warning("DEBUGGING: after reshape")
+        pmat_neighb=pmat_neighb.T
+        log.warning("DEBUGGING: after transpose")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
         log.warning("DEBUGGING: after unique")                        
