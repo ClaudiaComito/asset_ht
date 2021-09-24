@@ -144,7 +144,11 @@ import heat as ht
 import torch
 import itertools
 
+# debugging
 import tracemalloc
+import logging
+logging.basicConfig(format='%(message)s')
+log = logging.getLogger(__name__)
 
 try:
     from mpi4py import MPI
@@ -1659,7 +1663,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values
-    print("DEBUGGING: starting x-y loop", file=sys.stderr)
+    log.warning("DEBUGGING: starting x-y loop")
     for y in bin_range_y:
 #        print("DEBUGGING: y = ", y)
         #TODO: vectorize loop along x axis (columns)    
@@ -1686,7 +1690,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         t_largest_vals_2d = t_mskd_2d.sort(dim=1)[0][:, -n_largest:]
         #print("debugging: t_largest_vals_2d.shape = ", t_largest_vals_2d.shape)
         t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
-    print("DEBUGGING: x-y loop done", file=sys.stderr)
+    log.warning("DEBUGGING: x-y loop done")
     if mat.is_distributed():            
         if rank == 0:
             t_lmat = t_lmat[:, :-l//2, :]
@@ -1695,10 +1699,10 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         else:
             t_lmat = t_lmat[:, l//2:-l//2, :]
         mat.comm.Barrier()
-    print("DEBUGGING: after Barrier", file=sys.stderr)
+    log.warning("DEBUGGING: after Barrier")
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
-    print("DEBUGGING: after lmat wrapping", file=sys.stderr)
+    log.warning("DEBUGGING: after lmat wrapping")
     #lmat = ht.array(t_lmat, is_split=1, device=mat.device, copy=False)
     #lmat.balance_()
     return lmat
