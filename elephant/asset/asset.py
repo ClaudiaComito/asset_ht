@@ -1696,8 +1696,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         mat.comm.Barrier()
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
-    #lmat = ht.array(t_lmat, is_split=1, device=mat.device)
-    lmat.balance_()
+    #lmat = ht.array(t_lmat, is_split=1, device=mat.device, copy=False)
+    #lmat.balance_()
     return lmat
 
 
@@ -3043,7 +3043,7 @@ class ASSET(object):
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
-        #TEST!!
+        # TEST
         return pmat_neighb.reshape((n_largest, pmat.size)).T
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
 
