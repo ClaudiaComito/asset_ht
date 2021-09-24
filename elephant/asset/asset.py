@@ -1659,6 +1659,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values
+    print("DEBUGGING: starting x-y loop", file=sys.stderr)
     for y in bin_range_y:
 #        print("DEBUGGING: y = ", y)
         #TODO: vectorize loop along x axis (columns)    
@@ -1685,7 +1686,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         t_largest_vals_2d = t_mskd_2d.sort(dim=1)[0][:, -n_largest:]
         #print("debugging: t_largest_vals_2d.shape = ", t_largest_vals_2d.shape)
         t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
-
+    print("DEBUGGING: x-y loop done", file=sys.stderr)
     if mat.is_distributed():            
         if rank == 0:
             t_lmat = t_lmat[:, :-l//2, :]
@@ -1694,8 +1695,10 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         else:
             t_lmat = t_lmat[:, l//2:-l//2, :]
         mat.comm.Barrier()
+    print("DEBUGGING: after Barrier", file=sys.stderr)
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
+    print("DEBUGGING: after lmat wrapping", file=sys.stderr)
     #lmat = ht.array(t_lmat, is_split=1, device=mat.device, copy=False)
     #lmat.balance_()
     return lmat
@@ -3043,8 +3046,6 @@ class ASSET(object):
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
-        # TEST
-        return pmat_neighb.reshape((n_largest, pmat.size)).T
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
 
         # in order to avoid doing the same calculation multiple times:
