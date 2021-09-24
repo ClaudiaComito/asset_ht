@@ -1663,7 +1663,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values
-    log.warning("DEBUGGING: starting x-y loop")
+    log.warning("DEBUGGING: starting x-y loop with y-range ", bin_range_y)
     for y in bin_range_y:
 #        print("DEBUGGING: y = ", y)
         #TODO: vectorize loop along x axis (columns)    
@@ -3050,7 +3050,9 @@ class ASSET(object):
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
+        log.warning("DEBUGGING: after pmat_neighbors_ht")
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
+        log.warning("DEBUGGING: after minimum")
 
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
@@ -3058,14 +3060,18 @@ class ASSET(object):
         # flatten the second and third dimension 
         
         pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size)).T
+        log.warning("DEBUGGING: after reshape.T")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
+        log.warning("DEBUGGING: after unique")                        
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
         
         jsf = _JSFUniformOrderStat3D(n=n, d=pmat_neighb.shape[1])
+        log.warning("DEBUGGING: after jsf")
         jpvmat = jsf.compute_ht(u=pmat_neighb)
+        log.warning("DEBUGGING: after jpvmat")
 
         # restore the original shape using the stored indices
         # TODO: possible memory bottleck with distributed jpvmat
