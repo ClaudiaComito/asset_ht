@@ -1663,7 +1663,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values
-    log.warning("DEBUGGING: starting x-y loop with y-range ", bin_range_y)
+    log.warning("DEBUGGING: starting x-y loop within y-range "+str(bin_range_y.start)+" and "+str(bin_range_y.stop))
     for y in bin_range_y:
 #        print("DEBUGGING: y = ", y)
         #TODO: vectorize loop along x axis (columns)    
