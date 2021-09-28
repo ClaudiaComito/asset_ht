@@ -1664,7 +1664,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values
-    log.warning("DEBUGGING: starting x-y loop within y-range "+str(bin_range_y.start)+" and "+str(bin_range_y.stop))
+    #log.warning("DEBUGGING: starting x-y loop within y-range "+str(bin_range_y.start)+" and "+str(bin_range_y.stop))
     for y in bin_range_y:
 #        print("DEBUGGING: y = ", y)
         #TODO: vectorize loop along x axis (columns)    
@@ -1693,7 +1693,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         #print("debugging: t_largest_vals_2d.shape = ", t_largest_vals_2d.shape)
         t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
         end = time.time()
-    log.warning("DEBUGGING: x-y loop done in  "+str(end-start)+" seconds with x-range "+str(bin_range_x.start)+" and "+str(bin_range_x.stop))
+    #log.warning("DEBUGGING: x-y loop done in  "+str(end-start)+" seconds with x-range "+str(bin_range_x.start)+" and "+str(bin_range_x.stop))
     if mat.is_distributed():            
         if rank == 0:
             t_lmat = t_lmat[:, :-l//2, :]
@@ -1702,10 +1702,10 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         else:
             t_lmat = t_lmat[:, l//2:-l//2, :]
         mat.comm.Barrier()
-    log.warning("DEBUGGING: after Barrier")
+    #log.warning("DEBUGGING: after Barrier")
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
-    log.warning("DEBUGGING: after lmat wrapping")
+    #log.warning("DEBUGGING: after lmat wrapping")
     #lmat = ht.array(t_lmat, is_split=1, device=mat.device, copy=False)
     #lmat.balance_()
     return lmat
@@ -3053,9 +3053,9 @@ class ASSET(object):
         # maximize them by the maximum value 1-p_value_min
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
-        log.warning("DEBUGGING: after pmat_neighbors_ht")
+        #log.warning("DEBUGGING: after pmat_neighbors_ht")
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
-        log.warning("DEBUGGING: after minimum")
+        #log.warning("DEBUGGING: after minimum")
 
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
@@ -3068,11 +3068,13 @@ class ASSET(object):
         pmat_neighb.balance_()
                 
         #pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size))
-        log.warning("DEBUGGING: after reshape")
+        #log.warning("DEBUGGING: after reshape")
         pmat_neighb=pmat_neighb.T
-        log.warning("DEBUGGING: after transpose")
+        #log.warning("DEBUGGING: after transpose")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
+        #TEST
+        
         log.warning("DEBUGGING: after unique")                        
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
