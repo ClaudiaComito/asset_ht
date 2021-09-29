@@ -132,6 +132,7 @@ import scipy.spatial
 import scipy.stats
 from sklearn.cluster import dbscan
 from sklearn.metrics import pairwise_distances, pairwise_distances_chunked
+from torch.functional import _return_inverse
 from tqdm import trange, tqdm
 
 import elephant.conversion as conv
@@ -3073,8 +3074,14 @@ class ASSET(object):
         #log.warning("DEBUGGING: after reshape")
         pmat_neighb=pmat_neighb.T
         #log.warning("DEBUGGING: after transpose")
-        pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
-                                                     return_inverse=True)
+        #TEST: LOCAL UNIQUE INSTEAD OF GLOBAL
+        #pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
+        #                                             return_inverse=True)
+        t_pmat_neighb, t_pmat_neighb_indices = torch.unique(pmat_neighb.larray, dim=0, sorted=True, return_inverse=True)
+        log.warning("DEBUGGING: after torch.unique") 
+        pmat_neighb = ht.array(t_pmat_neighb, is_split=0, copy=False)
+        log.warning("DEBUGGING: after ht.array(t_unique)") 
+        #pmat_neighb_indices = ht.array(t_pmat_neighb_indices, is_split=0, copy=False)
         #TEST
         
         log.warning("DEBUGGING: after unique")                        
@@ -3091,8 +3098,8 @@ class ASSET(object):
         # TODO: possible memory bottleck with distributed jpvmat
         # distributed getitem!
         # TEST: skip resplit
-        jpvmat.resplit_(None)
-        jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
+        #jpvmat.resplit_(None)
+        #jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
         return 1. - jpvmat
 
     @staticmethod
