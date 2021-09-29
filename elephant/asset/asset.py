@@ -3077,7 +3077,7 @@ class ASSET(object):
         #TEST: LOCAL UNIQUE INSTEAD OF GLOBAL
         #pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
         #                                             return_inverse=True)
-        log.warning("DEBUGGING: before torch.unique")
+        #log.warning("DEBUGGING: before torch.unique")
         t_pmat_neighb = torch.unique(pmat_neighb.larray, dim=0, sorted=True)
         log.warning("DEBUGGING: after torch.unique") 
         pmat_neighb = ht.array(t_pmat_neighb, is_split=0, copy=False)
