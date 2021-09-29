@@ -146,6 +146,7 @@ import itertools
 
 # debugging
 import tracemalloc
+from memory_profiler import profile
 import logging
 logging.basicConfig(format='%(message)s')
 log = logging.getLogger(__name__)
@@ -3006,6 +3007,7 @@ class ASSET(object):
 
         return 1. - jpvmat
 
+    @profile
     def joint_probability_matrix_ht(self, pmat, filter_shape, n_largest,
                                  min_p_value=1e-5, precision='double'):
         """
