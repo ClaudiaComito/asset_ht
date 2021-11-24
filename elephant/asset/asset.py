@@ -3008,7 +3008,7 @@ class ASSET(object):
 
         return 1. - jpvmat
 
-    @profile
+    #@profile
     def joint_probability_matrix_ht(self, pmat, filter_shape, n_largest,
                                  min_p_value=1e-5, precision='double'):
         """
@@ -3074,15 +3074,14 @@ class ASSET(object):
         #log.warning("DEBUGGING: after reshape")
         pmat_neighb=pmat_neighb.T
         #log.warning("DEBUGGING: after transpose")
-        #TEST: LOCAL UNIQUE INSTEAD OF GLOBAL
-        #pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
+        pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
         #                                             return_inverse=True)
-        #log.warning("DEBUGGING: before torch.unique")
-        t_pmat_neighb = torch.unique(pmat_neighb.larray, dim=0, sorted=True)
-        log.warning("DEBUGGING: after torch.unique") 
-        pmat_neighb = ht.array(t_pmat_neighb, is_split=0, copy=False)
-        log.warning("DEBUGGING: after ht.array(t_unique)") 
-        #pmat_neighb_indices = ht.array(t_pmat_neighb_indices, is_split=0, copy=False)
+        log.warning("DEBUGGING: after ht.unique")
+        # t_pmat_neighb = torch.unique(pmat_neighb.larray, dim=0, sorted=True)
+        # log.warning("DEBUGGING: after torch.unique") 
+        # pmat_neighb = ht.array(t_pmat_neighb, is_split=0, copy=False)
+        # log.warning("DEBUGGING: after ht.array(t_unique)") 
+        # #pmat_neighb_indices = ht.array(t_pmat_neighb_indices, is_split=0, copy=False)
         #TEST
         
         log.warning("DEBUGGING: after unique")                        
@@ -3098,9 +3097,8 @@ class ASSET(object):
         # restore the original shape using the stored indices
         # TODO: possible memory bottleck with distributed jpvmat
         # distributed getitem!
-        # TEST: skip resplit
-        #jpvmat.resplit_(None)
-        #jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
+        jpvmat.resplit_(None)
+        jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
         return 1. - jpvmat
 
     @staticmethod
