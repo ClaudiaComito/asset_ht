@@ -3049,19 +3049,22 @@ class ASSET(object):
         pmat_neighb = ht.array(t_pmat_neighb, is_split=1, copy=False)
         pmat_neighb.balance_()
         pmat_neighb=pmat_neighb.T
-        log.warning("DEBUGGING: before ht.unique")
+#        log.warning("DEBUGGING: before ht.unique")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
-        log.warning("DEBUGGING: after ht.unique")
+        if pmat_neighb.comm.rank == 0:
+            log.warning("DEBUGGING: after ht.unique")                                                     
 
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
         
         jsf = _JSFUniformOrderStat3D(n=n, d=pmat_neighb.shape[1])
-        log.warning("DEBUGGING: after jsf")
+        if pmat_neighb.comm.rank == 0:
+            log.warning("DEBUGGING: after jsf")
         jpvmat = jsf.compute_ht(u=pmat_neighb)
-        log.warning("DEBUGGING: after jpvmat")
+        if pmat_neighb.comm.rank == 0:
+            log.warning("DEBUGGING: after jpvmat")
 
         # restore the original shape using the stored indices
         # TODO: possible memory bottleck with distributed jpvmat
