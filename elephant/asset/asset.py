@@ -507,7 +507,7 @@ def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
         Square matrix of distances between all pairs of points.
 
     """
-    alpha = ht.deg2rad(ht.array(ref_angle))  # reference angle in radians
+    alpha = ht.deg2rad(ht.array(ref_angle, copy=False))  # reference angle in radians
 
     # Create the array of points (one per row) for which to compute the
     # stretched distance
@@ -520,8 +520,8 @@ def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
     x, y = xy_mat[:, 0], xy_mat[:, 1]
     x_array = ht.tile(x, reps=(x.gshape[0], 1))
     y_array = ht.tile(y, reps=(y.gshape[0], 1))
-    dX = x_array.T - x_array.resplit_(axis=1)  # dX[i,j]: x difference between points i and j
-    dY = y_array.T - y_array.resplit_(axis=1)  # dY[i,j]: y difference between points i and j
+    dX = x_array.T - x_array.resplit_(axis=0)  # dX[i,j]: x difference between points i and j
+    dY = y_array.T - y_array.resplit_(axis=0)  # dY[i,j]: y difference between points i and j
 
     # Compute the matrix Theta of angles between each pair of points
     theta = ht.arctan2(dY, dX)
@@ -535,8 +535,6 @@ def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
     # Compute the matrix of stretching factors for each pair of points
     stretch_mat = 1 + (stretch - 1.) * ht.abs(ht.sin(alpha - theta))
     # Return the stretched distance matrix
-    # TODO: too much redistribution: check actual needs
-    stretch_mat.resplit_(0)
     return D * stretch_mat
 
 
@@ -1641,10 +1639,6 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     # values
     mat = mat.astype(ht.float32) # TODO: not sure this is necessary, check
 
-    # Initialize DNDarray of d-largest values to zero
-    # Note: mat is distributed along the rows (split=0), and so is lmat (split=1)
-    #lmat = ht.zeros((n_largest,) + mat.shape, dtype=ht.float32, split=1) 
-
     # heat: get right-hand halo if necessary
     if mat.is_distributed():
         offset, _, _ = mat.comm.chunk(mat.gshape, mat.split)
@@ -1666,24 +1660,13 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_x = range(N_bin_x - l + 1)
     
     # compute matrix of largest values
-    #log.warning("DEBUGGING: starting x-y loop within y-range "+str(bin_range_y.start)+" and "+str(bin_range_y.stop))
     for y in bin_range_y:
-#        print("DEBUGGING: y = ", y)
-        #TODO: vectorize loop along x axis (columns)    
         if symmetric:
             # x range depends on y position
             bin_range_x = range(y + offset - l + 1)
-        start = time.time()
-        # for x in bin_range_x:
-        #     # work on local torch tensors
-        #     t_patch = t_mat[y:y + l, x:x + l]  
-        #     t_mskd = t_filt * t_patch 
-        #     t_largest_vals = t_mskd.flatten().sort()[0][-n_largest:]
-        #     t_lmat[:, y + (l // 2), x + (l // 2)] = t_largest_vals
-        # vectorize (see https://stackoverflow.com/questions/39232790/numpy-vectorization-of-sliding-window-operation)
-        #print("DEBUGGING: bin_range_x = ", bin_range_x)
+        # vectorize loop along x
+        # (see https://stackoverflow.com/questions/39232790/numpy-vectorization-of-sliding-window-operation)
         t_strip = t_mat[y:y + l, bin_range_x.start:bin_range_x.stop-1+l]
-        #print("DEBUGGING: t_strip.shape = ", t_strip.shape)
         # sliding matrix multiplication. Transpose to slide along rows
         t_strip = t_strip.T
         t_filt = t_filt.T
@@ -1692,10 +1675,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         # transpose back and flatten rows/columns
         t_mskd_2d = torch.transpose(t_mskd_3d, 1, 2).reshape(t_mskd_3d.shape[0], -1)
         t_largest_vals_2d = t_mskd_2d.sort(dim=1)[0][:, -n_largest:]
-        #print("debugging: t_largest_vals_2d.shape = ", t_largest_vals_2d.shape)
         t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
-        end = time.time()
-    #log.warning("DEBUGGING: x-y loop done in  "+str(end-start)+" seconds with x-range "+str(bin_range_x.start)+" and "+str(bin_range_x.stop))
+
     if mat.is_distributed():            
         if rank == 0:
             t_lmat = t_lmat[:, :-l//2, :]
@@ -1704,12 +1685,10 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         else:
             t_lmat = t_lmat[:, l//2:-l//2, :]
         mat.comm.Barrier()
-    #log.warning("DEBUGGING: after Barrier")
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
+    # Note: mat is distributed along the rows (split=0), and so is lmat (split=1)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
-    #log.warning("DEBUGGING: after lmat wrapping")
-    #lmat = ht.array(t_lmat, is_split=1, device=mat.device, copy=False)
-    #lmat.balance_()
+    lmat.balance_()
     return lmat
 
 
@@ -3069,22 +3048,12 @@ class ASSET(object):
         t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
         pmat_neighb = ht.array(t_pmat_neighb, is_split=1, copy=False)
         pmat_neighb.balance_()
-                
-        #pmat_neighb=pmat_neighb.reshape((n_largest, pmat.size))
-        #log.warning("DEBUGGING: after reshape")
         pmat_neighb=pmat_neighb.T
-        #log.warning("DEBUGGING: after transpose")
+        log.warning("DEBUGGING: before ht.unique")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
-        #                                             return_inverse=True)
+                                                     return_inverse=True)
         log.warning("DEBUGGING: after ht.unique")
-        # t_pmat_neighb = torch.unique(pmat_neighb.larray, dim=0, sorted=True)
-        # log.warning("DEBUGGING: after torch.unique") 
-        # pmat_neighb = ht.array(t_pmat_neighb, is_split=0, copy=False)
-        # log.warning("DEBUGGING: after ht.array(t_unique)") 
-        # #pmat_neighb_indices = ht.array(t_pmat_neighb_indices, is_split=0, copy=False)
-        #TEST
-        
-        log.warning("DEBUGGING: after unique")                        
+
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
                 w + 1)  # number of entries covered by kernel
@@ -3207,8 +3176,7 @@ class ASSET(object):
             mask &= mat > thresh
 
         # Replace nans, coming from False * np.inf, with zeros
-        # TODO: update to latest heat getitem: larray needed?
-        mask_isnan = ht.where(mask == ht.nan).larray
+        mask_isnan = ht.where(mask == ht.nan)
         mask[mask_isnan] = False
 
         return mask
@@ -3404,8 +3372,9 @@ class ASSET(object):
 
         # List the significant pixels of mat in a 2-columns array
         local_pos_sgnf = ht.where(mask_matrix > 0)
-        t_local_pos_sgnf = local_pos_sgnf._DNDarray__array
+        t_local_pos_sgnf = local_pos_sgnf.larray
         t_x, t_y = t_local_pos_sgnf[:, 0], t_local_pos_sgnf[:, 1]
+
         if local_pos_sgnf.is_distributed():
             # local_pos_sgnf is unevenly distributed, we need this information later
             # store unbalanced slice information and share among ranks
