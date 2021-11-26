@@ -3114,13 +3114,15 @@ class ASSET(object):
         
         # TEST: bypass ht.reshape
         t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
+        if pmat_neighb.comm.rank == 0:
+            log.warning("JMAT: after local reshape")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER RESHAPE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb = ht.array(t_pmat_neighb, is_split=1)#, copy=False)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
-            log.warning("JMAT: after reshape")
+            log.warning("JMAT: after ht.array(is_split=1)")
 
         pmat_neighb.balance_()
         if pmat_neighb.comm.rank == 0:
