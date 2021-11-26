@@ -152,6 +152,7 @@ import logging
 logging.basicConfig(format='%(message)s')
 log = logging.getLogger(__name__)
 import time
+import gc
 
 try:
     from mpi4py import MPI
@@ -3094,6 +3095,7 @@ class ASSET(object):
             log.warning("JMAT: calling pmat_neighbors_ht")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
+        gc.collect()
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: AFTER PMAT_NEIGHBORS_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
