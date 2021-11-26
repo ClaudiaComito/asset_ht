@@ -2767,7 +2767,8 @@ class ASSET(object):
             imat = self.intersection_matrix_ht()
 
         if imat.comm.rank == 0:
-            log.warning("in probability_matrix_analytical_ht")
+            log.warning("PMAT: in probability_matrix_analytical_ht")
+
         symmetric = self.is_symmetric()
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: before spiketrains_binned: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
@@ -2805,6 +2806,9 @@ class ASSET(object):
                 'fir_rates_x must be a list or the string "estimate"')
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: after firing_rates 1: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        
+        if imat.comm.rank == 0:
+            log.warning("PMAT: fir_rate_x defined")
 
         if symmetric:
             fir_rate_y = fir_rate_x
@@ -2830,9 +2834,13 @@ class ASSET(object):
                   'bins...')
 
         rate_bins_x = (fir_rate_x * self.bin_size).simplified.magnitude
+        if imat.comm.rank == 0:
+            log.warning("PMAT: rate_bin_x defined")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: after rate_bins_x: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         spike_probs_x = 1. - np.exp(-rate_bins_x)
+        if imat.comm.rank == 0:
+            log.warning("PMAT: spike_probs_x defined")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: after spike_probs 1: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if symmetric:
@@ -2840,6 +2848,8 @@ class ASSET(object):
         else:
             rate_bins_y = (fir_rate_y * self.bin_size).simplified.magnitude
             spike_probs_y = 1. - np.exp(-rate_bins_y)
+        if imat.comm.rank == 0:
+            log.warning("PMAT: spike_probs_y defined")
 
         # switch to heat: 
         # distribute data along columns in preparation for dot product
@@ -2856,6 +2866,8 @@ class ASSET(object):
         # matrices p_ijk computed for each neuron k:
         # p_ijk is the probability that neuron k spikes in both bins i and j.
         # The sum of outer products is equivalent to a dot product.
+        if imat.comm.rank == 0:
+            log.warning("PMAT: spike_probs distributed")
 
         if self.verbose:
             print(
@@ -2863,6 +2875,9 @@ class ASSET(object):
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: before ht.dot: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         Mu = ht.dot(spike_probs_x.T, spike_probs_y)
+        if imat.comm.rank == 0:
+            log.warning("PMAT: Mu calculated")
+
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: after ht.dot: Current memory usage is {current / 10**6}; Peak was {peak / 10**6}MB")
         # Compute the probability matrix obtained from imat using the Poisson
@@ -2870,12 +2885,17 @@ class ASSET(object):
         # just like imat, pmat is distributed along the rows (split=0)
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
         pmat = ht.array(np_pmat, is_split=0)#, copy=False)
+        if imat.comm.rank == 0:
+            log.warning("PMAT: distributed pmat")
 
         if symmetric:
             # Substitute 0.5 to the elements along the main diagonal
             if self.verbose:
                 print("substitute 0.5 to elements along the main diagonal...")
             pmat.fill_diagonal(0.5)
+
+        if pmat.comm.rank == 0:
+            log.warning("PMAT: exiting probability_matrix_analytical_ht")
 
         return pmat
 
