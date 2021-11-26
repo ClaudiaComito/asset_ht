@@ -1663,8 +1663,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_y = range(N_bin_y - l + 1)
         bin_range_x = range(N_bin_x - l + 1)
     
-    if mat.comm.rank == 0:
-        log.warning("PMAT_NEIGHB: about to enter loop")
+    if mat.comm.rank == 0 or mat.comm.rank == size-1:
+        log.warning(f"PMAT_NEIGHB: about to enter loop. bin_range_y is {bin_range_y}")
     # compute matrix of largest values
     for y in bin_range_y:
         if symmetric:
@@ -3136,6 +3136,7 @@ class ASSET(object):
 
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        gc.collect()
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, return_inverse=True)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER UNIQUE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")                                                    
