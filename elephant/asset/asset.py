@@ -1632,6 +1632,9 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     filt = ht.ones((l, l), dtype=ht.float32) #process-local, split=None
     filt = ht.triu(filt, -w)
     filt = ht.tril(filt, w)
+    if mat.comm.rank == 0:
+        log.warning("PMAT_NEIGHB: kernel constructed")
+
     # heat: extract torch tensor for faster loop
     t_filt = filt.larray
 
@@ -1659,6 +1662,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         bin_range_y = range(N_bin_y - l + 1)
         bin_range_x = range(N_bin_x - l + 1)
     
+    if mat.comm.rank == 0:
+        log.warning("PMAT_NEIGHB: about to enter loop")
     # compute matrix of largest values
     for y in bin_range_y:
         if symmetric:
@@ -1688,7 +1693,12 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
     # wrap local t_lmat into global lmat (imbalanced because of calc over halos)
     # Note: mat is distributed along the rows (split=0), and so is lmat (split=1)
     lmat = ht.dndarray.DNDarray(t_lmat, gshape=(n_largest,) + mat.shape, dtype=ht.float32, split=1, device=mat.device, comm=mat.comm, balanced=False)
+    if mat.comm.rank == 0:
+        log.warning("PMAT_NEIGHB: lmat constructed")
     lmat.balance_()
+    if mat.comm.rank == 0:
+        log.warning("PMAT_NEIGHB: lmat balanced")
+    
     return lmat
 
 
@@ -3080,6 +3090,8 @@ class ASSET(object):
         # maximize them by the maximum value 1-p_value_min
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        if pmat.comm.rank == 0:
+            log.warning("JMAT: calling pmat_neighbors_ht")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
         # current, peak = tracemalloc.get_traced_memory()
