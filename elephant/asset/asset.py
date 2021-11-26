@@ -2885,6 +2885,8 @@ class ASSET(object):
         # pdfs
         # just like imat, pmat is distributed along the rows (split=0)
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
+        if imat.comm.rank == 0:
+            log.warning("PMAT: np_mat calculated")
         pmat = ht.array(np_pmat, is_split=0)#, copy=False) # TODO: WHY DOES COPY=FALSE REQUIRE MORE MEMORY HERE?
         if imat.comm.rank == 0:
             log.warning("PMAT: distributed pmat")
