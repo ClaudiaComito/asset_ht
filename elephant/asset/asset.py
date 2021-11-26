@@ -507,7 +507,7 @@ def _stretched_metric_2d_ht(xy_mat, stretch, ref_angle):
         Square matrix of distances between all pairs of points.
 
     """
-    alpha = ht.deg2rad(ht.array(ref_angle, copy=False))  # reference angle in radians
+    alpha = ht.deg2rad(ht.array(ref_angle))  # reference angle in radians
 
     # Create the array of points (one per row) for which to compute the
     # stretched distance
@@ -2766,9 +2766,14 @@ class ASSET(object):
             # Compute the intersection matrix of the original data
             imat = self.intersection_matrix_ht()
 
+        if imat.comm.rank == 0:
+            log.warning("in probability_matrix_analytical_ht")
         symmetric = self.is_symmetric()
-
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: before spiketrains_binned: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         bsts_x_matrix = self.spiketrains_binned_i.to_bool_array()
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after spiketrains_binned: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         if symmetric:
             bsts_y_matrix = bsts_x_matrix
@@ -2779,6 +2784,8 @@ class ASSET(object):
             if bsts_x_matrix.shape[0] != bsts_y_matrix.shape[0]:
                 raise ValueError(
                     'Different number of neurons along the x and y axis!')
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after is_symmetric: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         # Define the firing rate profiles
         if firing_rates_x == 'estimate':
@@ -2796,6 +2803,8 @@ class ASSET(object):
         else:
             raise ValueError(
                 'fir_rates_x must be a list or the string "estimate"')
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after firing_rates 1: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         if symmetric:
             fir_rate_y = fir_rate_x
@@ -2812,6 +2821,8 @@ class ASSET(object):
         else:
             raise ValueError(
                 'fir_rates_y must be a list or the string "estimate"')
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after firing_rates 2: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         # For each neuron, compute the prob. that that neuron spikes in any bin
         if self.verbose:
@@ -2819,7 +2830,11 @@ class ASSET(object):
                   'bins...')
 
         rate_bins_x = (fir_rate_x * self.bin_size).simplified.magnitude
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after rate_bins_x: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         spike_probs_x = 1. - np.exp(-rate_bins_x)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after spike_probs 1: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if symmetric:
             spike_probs_y = spike_probs_x
         else:
@@ -2828,8 +2843,12 @@ class ASSET(object):
 
         # switch to heat: 
         # distribute data along columns in preparation for dot product
-        spike_probs_x = ht.array(spike_probs_x, split=1)
-        spike_probs_y = ht.array(spike_probs_y, split=1)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: before spike_probs: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        spike_probs_x = ht.array(spike_probs_x, split=1, copy=False) # done
+        spike_probs_y = ht.array(spike_probs_y, split=1, copy=False) # done
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after spike_probs: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         # Compute the matrix Mu[i, j] of parameters for the Poisson
         # distributions which describe, at each (i, j), the approximated
@@ -2841,13 +2860,16 @@ class ASSET(object):
         if self.verbose:
             print(
                 "compute the probability matrix by Le Cam's approximation...")
-        
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: before ht.dot: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         Mu = ht.dot(spike_probs_x.T, spike_probs_y)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"PMAT: after ht.dot: Current memory usage is {current / 10**6}; Peak was {peak / 10**6}MB")
         # Compute the probability matrix obtained from imat using the Poisson
         # pdfs
         # just like imat, pmat is distributed along the rows (split=0)
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
-        pmat = ht.array(np_pmat, is_split=0)
+        pmat = ht.array(np_pmat, is_split=0)#, copy=False)
 
         if symmetric:
             # Substitute 0.5 to the elements along the main diagonal
@@ -3033,10 +3055,18 @@ class ASSET(object):
 
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
+        # current, peak = tracemalloc.get_traced_memory()
+        # log.warning(f"JMAT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
-        #log.warning("DEBUGGING: after pmat_neighbors_ht")
+        # current, peak = tracemalloc.get_traced_memory()
+        # log.warning(f"JMAT: AFTER PMAT_NEIGHBORS_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        if pmat_neighb.comm.rank == 0:
+            log.warning("DEBUGGING: after pmat_neighbors_ht")
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"JMAT: AFTER MINIMUM: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+
         #log.warning("DEBUGGING: after minimum")
 
         # in order to avoid doing the same calculation multiple times:
@@ -3046,12 +3076,24 @@ class ASSET(object):
         
         # TEST: bypass ht.reshape
         t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
-        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, copy=False)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"JMAT: AFTER RESHAPE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        pmat_neighb = ht.array(t_pmat_neighb, is_split=1)#, copy=False)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb.balance_()
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"JMAT: AFTER BALANCE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+
         pmat_neighb=pmat_neighb.T
-#        log.warning("DEBUGGING: before ht.unique")
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        if pmat_neighb.comm.rank == 0:
+            log.warning("DEBUGGING: before ht.unique")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
+        # current, peak = tracemalloc.get_traced_memory()
+        # print(f"JMAT: AFTER UNIQUE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")                                                    
         if pmat_neighb.comm.rank == 0:
             log.warning("DEBUGGING: after ht.unique")                                                     
 
