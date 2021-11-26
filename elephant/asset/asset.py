@@ -3097,12 +3097,13 @@ class ASSET(object):
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: AFTER PMAT_NEIGHBORS_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
-            log.warning("DEBUGGING: after pmat_neighbors_ht")
+            log.warning("JMAT: after pmat_neighbors_ht")
         pmat_neighb=ht.minimum(pmat_neighb, 1. - min_p_value)
+        if pmat_neighb.comm.rank == 0:
+            log.warning("JMAT: after minimum")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER MINIMUM: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
-        #log.warning("DEBUGGING: after minimum")
 
         # in order to avoid doing the same calculation multiple times:
         # find all unique sets of values in pmat_neighb
@@ -3116,15 +3117,21 @@ class ASSET(object):
         pmat_neighb = ht.array(t_pmat_neighb, is_split=1)#, copy=False)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
+        if pmat_neighb.comm.rank == 0:
+            log.warning("JMAT: after reshape")
+
         pmat_neighb.balance_()
+        if pmat_neighb.comm.rank == 0:
+            log.warning("JMAT: after balance")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER BALANCE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
 
         pmat_neighb=pmat_neighb.T
+        if pmat_neighb.comm.rank == 0:
+            log.warning("JMAT: after transpose")
+
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
-        if pmat_neighb.comm.rank == 0:
-            log.warning("DEBUGGING: before ht.unique")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
                                                      return_inverse=True)
         # current, peak = tracemalloc.get_traced_memory()
