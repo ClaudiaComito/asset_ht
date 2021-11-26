@@ -2833,12 +2833,13 @@ class ASSET(object):
             print('compute the prob. that each neuron fires in each pair of '
                   'bins...')
 
-        rate_bins_x = (fir_rate_x * self.bin_size).simplified.magnitude
-        if imat.comm.rank == 0:
-            log.warning("PMAT: rate_bin_x defined")
+#        if imat.comm.rank == 0:
+#            log.warning("PMAT: rate_bin_x defined")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"PMAT: after rate_bins_x: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
-        spike_probs_x = 1. - np.exp(-rate_bins_x)
+        # SAVE SOME MEMORY
+        # rate_bins_x = (fir_rate_x * self.bin_size).simplified.magnitude
+        spike_probs_x = 1. - np.exp(-(fir_rate_x * self.bin_size).simplified.magnitude)
         if imat.comm.rank == 0:
             log.warning("PMAT: spike_probs_x defined")
         # current, peak = tracemalloc.get_traced_memory()
@@ -2846,8 +2847,8 @@ class ASSET(object):
         if symmetric:
             spike_probs_y = spike_probs_x
         else:
-            rate_bins_y = (fir_rate_y * self.bin_size).simplified.magnitude
-            spike_probs_y = 1. - np.exp(-rate_bins_y)
+            # rate_bins_y = (fir_rate_y * self.bin_size).simplified.magnitude
+            spike_probs_y = 1. - np.exp(-(fir_rate_y * self.bin_size).simplified.magnitude)
         if imat.comm.rank == 0:
             log.warning("PMAT: spike_probs_y defined")
 
@@ -2884,7 +2885,7 @@ class ASSET(object):
         # pdfs
         # just like imat, pmat is distributed along the rows (split=0)
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
-        pmat = ht.array(np_pmat, is_split=0)#, copy=False)
+        pmat = ht.array(np_pmat, is_split=0)#, copy=False) # TODO: WHY DOES COPY=FALSE REQUIRE MORE MEMORY HERE?
         if imat.comm.rank == 0:
             log.warning("PMAT: distributed pmat")
 
