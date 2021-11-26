@@ -3132,8 +3132,7 @@ class ASSET(object):
 
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
-        pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0,
-                                                     return_inverse=True)
+        pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, return_inverse=True)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER UNIQUE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")                                                    
         if pmat_neighb.comm.rank == 0:
