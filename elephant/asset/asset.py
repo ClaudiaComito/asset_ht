@@ -1630,7 +1630,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
                       'for both entries of filter_shape.')
 
     # Construct the kernel 
-    filt = ht.ones((l, l), dtype=ht.float32) #process-local, split=None
+    filt = ht.ones((l, l), dtype=ht.float32, device=mat.device) #process-local, split=None
     filt = ht.triu(filt, -w)
     filt = ht.tril(filt, w)
     if mat.comm.rank == 0:
@@ -1641,7 +1641,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
 
     # Convert mat values to floats, and replaces np.infs with specified input
     # values
-    mat = mat.astype(ht.float32) # TODO: not sure this is necessary, check
+    mat = mat.astype(ht.float32)
 
     # heat: get right-hand halo if necessary
     if mat.is_distributed():
@@ -1676,7 +1676,7 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         # sliding matrix multiplication. Transpose to slide along rows
         t_strip = t_strip.T
         t_filt = t_filt.T
-        idx = torch.arange(t_strip.shape[0]-l+1)[:,None] + torch.arange(l)
+        idx = torch.arange(t_strip.shape[0]-l+1,device=t_mat.device)[:,None] + torch.arange(l,device=t_mat.device)
         t_mskd_3d = t_filt*t_strip[idx]
         # transpose back and flatten rows/columns
         t_mskd_2d = torch.transpose(t_mskd_3d, 1, 2).reshape(t_mskd_3d.shape[0], -1)
@@ -2692,8 +2692,8 @@ class ASSET(object):
         # distributions which describe, at each (i, j), the approximated
         # overlap probability. This matrix is just the sum of the probability
         # matrices p_ijk computed for each neuron k:
-        # p_ijk is the probability that neuron k spikes in both bins i and j.
         # The sum of outer products is equivalent to a dot product.
+        # p_ijk is the probability that neuron k spikes in both bins i and j.
         if self.verbose:
             print(
                 "compute the probability matrix by Le Cam's approximation...")
@@ -3087,15 +3087,18 @@ class ASSET(object):
         """
         l, w = filter_shape
 
+        # move to GPU if possible
+        if torch.cuda.device_count() > 0:
+            pmat = pmat.gpu()
+
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat.comm.rank == 0:
-            log.warning("JMAT: calling pmat_neighbors_ht")
+            log.warning(f"JMAT: calling pmat_neighbors_ht on device {pmat.device}")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
-        gc.collect()
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: AFTER PMAT_NEIGHBORS_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
@@ -3118,8 +3121,7 @@ class ASSET(object):
             log.warning("JMAT: after local reshape")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER RESHAPE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
-        pmat_neighb = ht.array(t_pmat_neighb, is_split=1)#, copy=False)
-        gc.collect()
+        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat.device)#, copy=False)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
@@ -3137,7 +3139,6 @@ class ASSET(object):
 
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
-        gc.collect()
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, return_inverse=True)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER UNIQUE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")                                                    
