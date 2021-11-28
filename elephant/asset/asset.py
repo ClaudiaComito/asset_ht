@@ -3087,9 +3087,9 @@ class ASSET(object):
         """
         l, w = filter_shape
 
-        # # move to GPU if possible
-        # if torch.cuda.device_count() > 0:
-        #     pmat = pmat.gpu()
+        # move to GPU if possible
+        if torch.cuda.device_count() > 0:
+            pmat = pmat.gpu()
 
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
