@@ -1682,6 +1682,8 @@ def _pmat_neighbors_ht(mat, filter_shape, n_largest):
         t_mskd_2d = torch.transpose(t_mskd_3d, 1, 2).reshape(t_mskd_3d.shape[0], -1)
         t_largest_vals_2d = t_mskd_2d.sort(dim=1)[0][:, -n_largest:]
         t_lmat[:, y + (l // 2), bin_range_x.start+(l // 2):bin_range_x.stop+(l//2)] = t_largest_vals_2d.T
+        if torch.cuda.device_count() > 0:
+            torch.cuda.empty_cache()
 
     if mat.is_distributed():            
         if rank == 0:
@@ -3096,7 +3098,7 @@ class ASSET(object):
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat.comm.rank == 0:
-            log.warning(f"JMAT: calling pmat_neighbors_ht on device {pmat.device}")
+            log.warning(f"JMAT: calling pmat_neighbors_ht on device {pmat.device} on {pmat.comm.size} nodes")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
         # current, peak = tracemalloc.get_traced_memory()
