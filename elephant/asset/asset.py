@@ -3089,9 +3089,9 @@ class ASSET(object):
         """
         l, w = filter_shape
 
-        # move to GPU if possible
-        if torch.cuda.device_count() > 0:
-            pmat = pmat.gpu()
+        # # move to GPU if possible
+        # if torch.cuda.device_count() > 0:
+        #     pmat = pmat.gpu()
 
         # Find for each P_ij in the probability matrix its neighbors and
         # maximize them by the maximum value 1-p_value_min
@@ -3101,6 +3101,7 @@ class ASSET(object):
             log.warning(f"JMAT: calling pmat_neighbors_ht on device {pmat.device} on {pmat.comm.size} nodes")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
+        del pmat
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: AFTER PMAT_NEIGHBORS_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
@@ -3117,13 +3118,14 @@ class ASSET(object):
         # and store the corresponding indices
         # flatten the second and third dimension 
         
-        # TEST: bypass ht.reshape
+        # TEST: bypass ht.reshape and ht.array
+        new_shape = pmat_neighb.__torch_proxy__.reshape((n_largest, -1)).shape
         t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
         if pmat_neighb.comm.rank == 0:
             log.warning("JMAT: after local reshape")
-        # current, peak = tracemalloc.get_traced_memory()
-        # print(f"JMAT: AFTER RESHAPE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
-        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat.device)#, copy=False)
+        pmat_neighb = ht.dndarray.DNDarray(t_pmat_neighb, gshape=tuple(new_shape), dtype=pmat_neighb.dtype, split=1, comm=pmat_neighb.comm, device=pmat_neighb.device, balanced=False)
+        pmat_neighb.__lshape_map = None
+#        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat.device)#, copy=False)
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
@@ -3139,6 +3141,12 @@ class ASSET(object):
         if pmat_neighb.comm.rank == 0:
             log.warning("JMAT: after transpose")
 
+        # move to GPU if possible
+        if torch.cuda.device_count() > 0:
+            pmat_neighb = pmat_neighb.gpu()
+
+        if pmat.comm.rank == 0:
+            log.warning(f"JMAT: calling ht.unique on device {pmat_neighb.device}")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, return_inverse=True)
