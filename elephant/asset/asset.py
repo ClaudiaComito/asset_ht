@@ -140,7 +140,7 @@ from elephant import spike_train_surrogates
 from elephant.utils import get_cuda_capability_major
 
 import sys
-sys.path.append("heat/")
+sys.path.insert(1,"./heat/")
 import heat as ht
 import torch
 import itertools
