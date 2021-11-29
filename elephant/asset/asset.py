@@ -3142,19 +3142,22 @@ class ASSET(object):
         if pmat_neighb.comm.rank == 0:
             log.warning("JMAT: after transpose")
 
-        # move to GPU if possible
-        if torch.cuda.device_count() > 0:
-            pmat_neighb = pmat_neighb.gpu()
+        # # move to GPU if possible
+        # if torch.cuda.device_count() > 0:
+        #     pmat_neighb = pmat_neighb.gpu()
 
         if pmat_neighb.comm.rank == 0:
             log.warning(f"JMAT: calling ht.unique on device {pmat_neighb.device}")
+        start = time.time()
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         pmat_neighb, pmat_neighb_indices = ht.unique(pmat_neighb, axis=0, return_inverse=True)
+        end = time.time()
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER UNIQUE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")                                                    
         if pmat_neighb.comm.rank == 0:
-            log.warning("DEBUGGING: after ht.unique")                                                     
+            log.warning("DEBUGGING: after ht.unique")
+            log.warning(f"JMAT: unique took {end - start} seconds on {pmat_neighb.comm.size} ranks")                                              
 
         # Compute the joint p-value matrix jpvmat
         n = l * (1 + 2 * w) - w * (
