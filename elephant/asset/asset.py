@@ -3101,6 +3101,7 @@ class ASSET(object):
             log.warning(f"JMAT: calling pmat_neighbors_ht on device {pmat.device} on {pmat.comm.size} nodes")
         pmat_neighb = _pmat_neighbors_ht(
             pmat, filter_shape=filter_shape, n_largest=n_largest)
+        pmat_shape = pmat.shape
         del pmat
         # current, peak = tracemalloc.get_traced_memory()
         # log.warning(f"JMAT: AFTER PMAT_NEIGHBORS_HT: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
@@ -3145,7 +3146,7 @@ class ASSET(object):
         if torch.cuda.device_count() > 0:
             pmat_neighb = pmat_neighb.gpu()
 
-        if pmat.comm.rank == 0:
+        if pmat_neighb.comm.rank == 0:
             log.warning(f"JMAT: calling ht.unique on device {pmat_neighb.device}")
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER TRANSPOSE: Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
@@ -3170,7 +3171,7 @@ class ASSET(object):
         # TODO: possible memory bottleck with distributed jpvmat
         # distributed getitem!
         jpvmat.resplit_(None)
-        jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat.shape)
+        jpvmat=jpvmat[pmat_neighb_indices].reshape(pmat_shape)
         return 1. - jpvmat
 
     @staticmethod
