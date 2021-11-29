@@ -3119,7 +3119,7 @@ class ASSET(object):
         # flatten the second and third dimension 
         
         # TEST: bypass ht.reshape and ht.array
-        new_shape = pmat_neighb.__torch_proxy__.reshape((n_largest, -1)).shape
+        new_shape = pmat_neighb.__torch_proxy__().reshape((n_largest, -1)).shape
         t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
         if pmat_neighb.comm.rank == 0:
             log.warning("JMAT: after local reshape")
