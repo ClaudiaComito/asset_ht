@@ -3132,7 +3132,7 @@ class ASSET(object):
         pmat_neighb.__lshape_map = None
         end = time.time()
         if pmat_neighb.comm.rank == 0:
-            log.warning(f"JMAT: ht.dndarray took {}s".format(end - start))
+            log.warning("JMAT: ht.dndarray took {}s".format(end - start))
         # start = time.time()
         # pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat_neighb.device, copy=False)
         # end = time.time()
