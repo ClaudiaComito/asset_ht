@@ -3126,13 +3126,20 @@ class ASSET(object):
         t_pmat_neighb = pmat_neighb.larray.reshape((n_largest, -1))
         if pmat_neighb.comm.rank == 0:
             log.warning("JMAT: after local reshape")
-        pmat_neighb = ht.dndarray.DNDarray(t_pmat_neighb, gshape=tuple(new_shape), dtype=pmat_neighb.dtype, split=1, comm=pmat_neighb.comm, device=pmat_neighb.device, balanced=False)
-        pmat_neighb.__lshape_map = None
-#        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat.device)#, copy=False)
+        # TEST: timing ht.array()
+        # start = time.time()
+        # pmat_neighb = ht.dndarray.DNDarray(t_pmat_neighb, gshape=tuple(new_shape), dtype=pmat_neighb.dtype, split=1, comm=pmat_neighb.comm, device=pmat_neighb.device, balanced=False)
+        # pmat_neighb.__lshape_map = None
+        # end = time.time()
+        # if pmat_neighb.comm.rank == 0:
+        #     log.warning(f"JMAT: ht.dndarray took {}s".format(end - start))
+        start = time.time()
+        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat.device, copy=False)
+        end = time.time()
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
         if pmat_neighb.comm.rank == 0:
-            log.warning("JMAT: after ht.array(is_split=1)")
+            log.warning("JMAT: ht.array(is_split=1) took {}s".format(end - start))
 
         pmat_neighb.balance_()
         if pmat_neighb.comm.rank == 0:
