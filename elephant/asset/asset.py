@@ -3134,7 +3134,7 @@ class ASSET(object):
         # if pmat_neighb.comm.rank == 0:
         #     log.warning(f"JMAT: ht.dndarray took {}s".format(end - start))
         start = time.time()
-        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat.device, copy=False)
+        pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat_neighb.device, copy=False)
         end = time.time()
         # current, peak = tracemalloc.get_traced_memory()
         # print(f"JMAT: AFTER array(reshape): Current memory usage is {current / 10**6}MB; Peak was {peak / 10**6}MB")
