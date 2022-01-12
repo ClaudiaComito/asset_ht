@@ -2900,9 +2900,9 @@ class ASSET(object):
         np_pmat = scipy.stats.poisson.cdf(imat.larray.numpy() - 1, Mu.larray.numpy())
         if imat.comm.rank == 0:
             log.warning("PMAT: np_mat calculated")
-        start = time.perf_counter()
+        start = time.time()
         pmat = ht.array(np_pmat, is_split=0, force_check=True)#, copy=False) # TODO: WHY DOES COPY=FALSE REQUIRE MORE MEMORY HERE?
-        end = time.perf_counter()
+        end = time.time()
         if imat.comm.rank == 0:
             log.warning("PMAT: distributed pmat: took {} seconds".format(end - start))
 
