@@ -2901,7 +2901,7 @@ class ASSET(object):
         if imat.comm.rank == 0:
             log.warning("PMAT: np_mat calculated")
         start = time.time()
-        pmat = ht.array(np_pmat, is_split=0, force_check=True)#, copy=False) # TODO: WHY DOES COPY=FALSE REQUIRE MORE MEMORY HERE?
+        pmat = ht.array(np_pmat, is_split=0)#, copy=False) # TODO: WHY DOES COPY=FALSE REQUIRE MORE MEMORY HERE?
         end = time.time()
         if imat.comm.rank == 0:
             log.warning("PMAT: distributed pmat: took {} seconds".format(end - start))
