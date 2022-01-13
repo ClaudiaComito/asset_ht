@@ -3133,6 +3133,7 @@ class ASSET(object):
         # end = time.time()
         # if pmat_neighb.comm.rank == 0:
         #     log.warning("JMAT: ht.dndarray took {}s".format(end - start))
+        pmat_neighb.comm.Barrier()
         start = time.time()
         pmat_neighb = ht.array(t_pmat_neighb, is_split=1, device=pmat_neighb.device, copy=False)
         end = time.time()
